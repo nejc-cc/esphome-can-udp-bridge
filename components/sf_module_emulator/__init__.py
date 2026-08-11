@@ -4,7 +4,7 @@ from esphome.components import binary_sensor
 from esphome.components.can_udp_bridge import CanUdpBridge
 from esphome.const import CONF_ADDRESS, CONF_ID
 
-CODEOWNERS = ["@nejc"]
+CODEOWNERS = ["@nejc-cc"]
 DEPENDENCIES = ["can_udp_bridge"]
 AUTO_LOAD = ["binary_sensor"]
 
