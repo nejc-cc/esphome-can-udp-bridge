@@ -13,7 +13,7 @@ from esphome.const import (
     STATE_CLASS_TOTAL_INCREASING,
 )
 
-CODEOWNERS = ["@nejc"]
+CODEOWNERS = ["@nejc-cc"]
 AUTO_LOAD = ["sensor", "binary_sensor", "text_sensor"]
 
 can_udp_bridge_ns = cg.esphome_ns.namespace("can_udp_bridge")
