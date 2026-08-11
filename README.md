@@ -221,5 +221,6 @@ Not solved:
 
 ## Licence
 
-Add one before publishing — MIT or Apache-2.0 are the usual choices for
-ESPHome components.
+[MIT](LICENSE). Chosen for compatibility with ESPHome (whose Python codebase is
+GPLv3) and because the bridge half is general-purpose enough that anyone
+tunnelling a different CAN bus should be able to lift it freely.

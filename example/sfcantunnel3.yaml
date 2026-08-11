@@ -103,9 +103,11 @@ number:
       - lambda: id(sfmod3).set_flow_b(x);
 
   - platform: template
-    # LEAVE AT 270 (absent): reporting this overwrites the buffer *1* middle
-    # sensor reading in the HMI, which looks like intended behaviour on their
-    # side. Only set it deliberately, and never on the real installation.
+    # LEAVE AT 270 (absent). If populated, the HMI shows this value in the
+    # buffer *1* middle field: buffer 1 has no middle sensor here, and instead
+    # of leaving it blank the HMI substitutes the next buffer-middle sensor it
+    # finds. The reading is correct but attributed to the wrong tank, so only
+    # set this deliberately, and never on a real installation.
     name: "Buffer 4 Middle (leave absent)"
     id: aux_buffer_mid
     optimistic: true
