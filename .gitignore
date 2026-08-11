@@ -1,0 +1,17 @@
+# Never commit real secrets
+secrets.yaml
+
+# ESPHome build output
+.esphome/
+**/.pioenvs/
+**/.piolibdeps/
+**/src/
+**/platformio.ini
+
+# Python
+__pycache__/
+*.pyc
+
+# Captures can be large; keep only ones you deliberately add
+*.asc
+!docs/traces/*.asc

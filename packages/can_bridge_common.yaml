@@ -1,0 +1,168 @@
+# Shared config for the Solarfocus CAN-over-LAN tunnel mesh (WT32-ETH01).
+#
+# Every tunable below is a substitution with a sane default — override any of
+# them in the device YAML *before* the `packages:` block. Device YAMLs must
+# still provide the things that can't be substituted: ethernet.manual_ip,
+# can_udp_bridge.peers and api.encryption (YAML !secret tags are resolved
+# before substitutions, so they can't be produced by ${...}).
+
+substitutions:
+  # --- board / ethernet (WT32-ETH01 defaults) ---
+  board: wt32-eth01
+  eth_type: LAN8720
+  eth_mdc_pin: GPIO23
+  eth_mdio_pin: GPIO18
+  eth_clk_mode: CLK_EXT_IN
+  eth_clk_pin: "0"
+  eth_phy_addr: "1"
+  eth_power_pin: GPIO16
+  # --- CAN transceiver wiring (SN65HVD230: TX->D/CTX, RX<-R/CRX) ---
+  can_tx_pin: "14"
+  can_rx_pin: "4"
+  # --- tunnel behaviour ---
+  can_bit_rate: "100000"
+  can_mode: bridge            # bridge | listen_only
+  tunnel_port: "20000"
+  # Per-frame forwarding — do NOT batch. The HMI polls, the HC module replies
+  # only when polled; a store-and-forward relay breaks the loop.
+  tunnel_buffer_frames: "1"
+  tunnel_buffer_timeout: 2ms
+  tunnel_peer_timeout: 5s
+  tunnel_keepalive: 1s
+  # --- status LEDs (active-low on WT32-ETH01) ---
+  led_traffic_pin: GPIO5
+  led_peer_pin: GPIO17
+  # --- misc ---
+  log_baud_rate: "115200"
+  web_port: "80"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: ${board}
+  framework:
+    type: esp-idf
+
+ethernet:
+  type: ${eth_type}
+  mdc_pin: ${eth_mdc_pin}
+  mdio_pin: ${eth_mdio_pin}
+  clk:
+    mode: ${eth_clk_mode}
+    pin: ${eth_clk_pin}
+  phy_addr: ${eth_phy_addr}
+  power_pin: ${eth_power_pin}
+
+logger:
+  baud_rate: ${log_baud_rate}
+
+api:
+  # The CAN tunnel does not depend on HA — don't reboot just because the
+  # dashboard is away (HA updates/maintenance would otherwise blip the bus).
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: !secret otapass
+
+web_server:
+  port: ${web_port}
+  version: 3
+  auth:
+    type: digest
+    username: !secret webuser
+    password: !secret webpass
+
+external_components:
+  - source: components/
+
+can_udp_bridge:
+  id: can_bridge
+  tx_pin: ${can_tx_pin}
+  rx_pin: ${can_rx_pin}
+  bit_rate: ${can_bit_rate}
+  mode: ${can_mode}
+  port: ${tunnel_port}
+  buffer_frames: ${tunnel_buffer_frames}
+  buffer_timeout: ${tunnel_buffer_timeout}
+  peer_timeout: ${tunnel_peer_timeout}
+  keepalive_interval: ${tunnel_keepalive}
+  rx_rate:
+    name: "CAN RX Rate"
+    id: can_rx_rate
+  tx_rate:
+    name: "CAN TX Rate"
+    id: can_tx_rate
+  bus_errors:
+    name: "CAN Bus Errors"
+  rx_missed:
+    name: "CAN RX Missed"
+  tx_failed:
+    name: "CAN TX Failed"
+  udp_lost:
+    name: "Tunnel Lost Packets"
+  peer_alive:
+    name: "Tunnel Peer Alive"
+    id: tunnel_peer_alive
+  bus_state:
+    name: "CAN Bus State"
+  last_frame:
+    name: "CAN Last Frame"
+
+# Onboard status LEDs (active-low → inverted). Purely status-driven,
+# not exposed as controllable HA entities.
+#   GPIO5  = traffic  : pulses each second CAN frames flowed (also proves loop alive)
+#   GPIO17 = peer/link : solid when the tunnel peer is reachable
+output:
+  - platform: gpio
+    id: led_traffic
+    pin:
+      number: ${led_traffic_pin}
+      inverted: true
+  - platform: gpio
+    id: led_peer
+    pin:
+      number: ${led_peer_pin}
+      inverted: true
+
+interval:
+  # Fast ~5 Hz balanced blink while CAN traffic is flowing (looks "busy");
+  # steady off when the bus is silent. Toggling also proves the loop is alive.
+  - interval: 100ms
+    then:
+      - lambda: |-
+          static bool phase = false;
+          bool traffic = id(can_rx_rate).has_state() && id(can_tx_rate).has_state() &&
+                         (id(can_rx_rate).state + id(can_tx_rate).state) > 0.0f;
+          if (traffic) {
+            phase = !phase;
+            if (phase) id(led_traffic).turn_on(); else id(led_traffic).turn_off();
+          } else {
+            phase = false;
+            id(led_traffic).turn_off();
+          }
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: "return id(tunnel_peer_alive).state;"
+          then:
+            - output.turn_on: led_peer
+          else:
+            - output.turn_off: led_peer
+
+sensor:
+  - platform: uptime
+    name: "${friendly_name} Uptime"
+    update_interval: 60s
+
+button:
+  - platform: restart
+    name: "Restart"
+  - platform: template
+    name: "Reset Counters"
+    entity_category: config
+    on_press:
+      - lambda: id(can_bridge).reset_counters();

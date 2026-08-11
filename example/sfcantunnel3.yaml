@@ -1,0 +1,217 @@
+# Solarfocus CAN tunnel 3 — segment with the real HC1 module + emulated module 3
+# (192.0.2.13). This board does double duty: tunnel endpoint AND emulated
+# Solarfocus module. Mesh: list every OTHER tunnel node here.
+substitutions:
+  device_name: sfcantunnel3
+  friendly_name: "SF CAN Tunnel 3 (HC1 + Mod3)"
+  # --- board / ethernet (WT32-ETH01) ---
+  board: wt32-eth01
+  eth_type: LAN8720
+  eth_mdc_pin: GPIO23
+  eth_mdio_pin: GPIO18
+  eth_clk_mode: CLK_EXT_IN
+  eth_clk_pin: "0"
+  eth_phy_addr: "1"
+  eth_power_pin: GPIO16
+  # --- CAN transceiver wiring (SN65HVD230: TX->D/CTX, RX<-R/CRX) ---
+  can_tx_pin: "14"
+  can_rx_pin: "4"
+  # --- tunnel behaviour ---
+  can_bit_rate: "100000"
+  can_mode: bridge               # bridge | listen_only
+  tunnel_port: "20000"
+  tunnel_buffer_frames: "1"      # 1 = per-frame forwarding; do NOT batch
+  tunnel_buffer_timeout: 2ms
+  tunnel_peer_timeout: 5s
+  tunnel_keepalive: 1s
+  # --- status LEDs (active-low) ---
+  led_traffic_pin: GPIO5
+  led_peer_pin: GPIO17
+  # --- misc ---
+  log_baud_rate: "115200"
+  web_port: "80"
+
+packages:
+  common: !include packages/can_bridge_common.yaml
+
+ethernet:
+  manual_ip:
+    static_ip: !secret ip_sfcantunnel3
+    gateway: !secret gateway
+    subnet: !secret subnet
+    dns1: !secret dns1
+
+can_udp_bridge:
+  peers:
+    - !secret ip_sfcantunnel1
+    - !secret ip_sfcantunnel2
+
+# Emulated Solarfocus electronic module at device address 3.
+# Three numbering systems refer to this one device, so mind which is which:
+#   device address (rotary switch) = 3
+#   heating circuits it serves     = 7 and 8
+#   what the HMI labels it         = 4 (buffer 4, DHW 4, circulation)
+# Entity names below use whichever numbering you would look for them under.
+# Add another list entry to emulate a second module on this same segment.
+sf_module_emulator:
+  - id: sfmod3
+    can_udp_bridge_id: can_bridge
+    address: 3
+    pump_a:
+      name: "HC7 Pump"
+    pump_b:
+      name: "HC8 Pump"
+    mixer_a_open:
+      name: "HC7 Mixer Open"
+    mixer_a_close:
+      name: "HC7 Mixer Close"
+    mixer_b_open:
+      name: "HC8 Mixer Open"
+    mixer_b_close:
+      name: "HC8 Mixer Close"
+    dhw_pump:
+      name: "DHW Pump"
+    circulation:
+      name: "Circulation Pump"
+
+# Simulated sensors. Until real DS18B20s are wired, these drive what the
+# emulated module reports. 270.0 = absent (the sentinel a real module sends).
+number:
+  - platform: template
+    name: "HC7 Flow Temperature"
+    id: hc7_flow
+    optimistic: true
+    restore_value: true
+    initial_value: 30.0
+    min_value: -20.0
+    max_value: 95.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    set_action:
+      - lambda: id(sfmod3).set_flow_a(x);
+  - platform: template
+    name: "HC8 Flow Temperature"
+    id: hc8_flow
+    optimistic: true
+    restore_value: true
+    initial_value: 30.0
+    min_value: -20.0
+    max_value: 95.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    set_action:
+      - lambda: id(sfmod3).set_flow_b(x);
+
+  - platform: template
+    # LEAVE AT 270 (absent): reporting this overwrites the buffer *1* middle
+    # sensor reading in the HMI, which looks like intended behaviour on their
+    # side. Only set it deliberately, and never on the real installation.
+    name: "Buffer 4 Middle (leave absent)"
+    id: aux_buffer_mid
+    optimistic: true
+    restore_value: true
+    initial_value: 270.0
+    min_value: -20.0
+    max_value: 270.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    entity_category: config
+    set_action:
+      - lambda: id(sfmod3).set_aux(0, x);
+  - platform: template
+    name: "Buffer 4 Bottom"
+    id: aux_buffer_bot
+    optimistic: true
+    restore_value: true
+    initial_value: 270.0
+    min_value: -20.0
+    max_value: 270.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    entity_category: config
+    set_action:
+      - lambda: id(sfmod3).set_aux(1, x);
+  - platform: template
+    name: "DHW 4 Tank"
+    id: aux_dhw_tank
+    optimistic: true
+    restore_value: true
+    initial_value: 270.0
+    min_value: -20.0
+    max_value: 270.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    entity_category: config
+    set_action:
+      - lambda: id(sfmod3).set_aux(2, x);
+  - platform: template
+    name: "Circulation Sensor"
+    id: aux_circulation
+    optimistic: true
+    restore_value: true
+    initial_value: 270.0
+    min_value: -20.0
+    max_value: 270.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    entity_category: config
+    set_action:
+      - lambda: id(sfmod3).set_aux(3, x);
+  - platform: template
+    name: "Buffer 4 Top"
+    id: aux_buffer_top
+    optimistic: true
+    restore_value: true
+    initial_value: 270.0
+    min_value: -20.0
+    max_value: 270.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    entity_category: config
+    set_action:
+      - lambda: id(sfmod3).set_aux(4, x);
+  - platform: template
+    name: "Aux ch4.w2 - no known effect"
+    id: aux_ch4_w2
+    optimistic: true
+    restore_value: true
+    initial_value: 270.0
+    min_value: -20.0
+    max_value: 270.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    entity_category: config
+    set_action:
+      - lambda: id(sfmod3).set_aux(5, x);
+  - platform: template
+    name: "Aux ch5.w0 - no known effect"
+    id: aux_ch5_w0
+    optimistic: true
+    restore_value: true
+    initial_value: 270.0
+    min_value: -20.0
+    max_value: 270.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    entity_category: config
+    set_action:
+      - lambda: id(sfmod3).set_aux(6, x);
+
+esphome:
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          id(sfmod3).set_flow_a(id(hc7_flow).state);
+          id(sfmod3).set_flow_b(id(hc8_flow).state);
+          id(sfmod3).set_aux(0, id(aux_buffer_mid).state);
+          id(sfmod3).set_aux(1, id(aux_buffer_bot).state);
+          id(sfmod3).set_aux(2, id(aux_dhw_tank).state);
+          id(sfmod3).set_aux(3, id(aux_circulation).state);
+          id(sfmod3).set_aux(4, id(aux_buffer_top).state);
+          id(sfmod3).set_aux(5, id(aux_ch4_w2).state);
+          id(sfmod3).set_aux(6, id(aux_ch5_w0).state);
+
+api:
+  encryption:
+    key: !secret sfcantunnel3__encryption_key
