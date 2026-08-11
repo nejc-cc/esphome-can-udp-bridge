@@ -3,7 +3,7 @@
 Sources: CANgaroo traces (`docs/traces/*.asc`), 100 kbps, 11-bit IDs
 + `Upgrade-Package-for-heating-circuit_Installation-Manual.pdf` (official pinout).
 Latest/best trace: "HMI searching +2 HC modules connected to network.asc" (40011 frames, 138 s,
-both modules present, operator toggling outputs one at a time near the end).
+both modules present, outputs toggled one at a time near the end).
 
 ## Addressing (CONFIRMED)
 - HMI poll ID = 0x1E6 + module_address; module response ID = 0x220 + module_address
@@ -69,7 +69,7 @@ X9/X10 are 230 V relay outputs with a limiting-thermostat loop (pins 4-5 must be
 Fuse F3 6.3 AT protects relay outputs.
 
 ### Output bit map (SOLVED — trace "outputs on 0x221 and DHW output on 0x222.asc")
-Operator toggled each output individually from the HMI output test, in this order:
+Each output was toggled individually from the HMI output test, in this order:
 pump A, pump B, mixer A open, mixer B open, mixer A close, mixer B close (identical sequence
 also present in the big 2-module trace, so it is reproducible).
 
@@ -90,7 +90,7 @@ Unassigned bits (lo0, lo1, lo7, hi0, hi1, hi4+) — X7 buffer charge pump presum
 
 ### Sensor register map (PARTLY SOLVED — trace "X37 and X38 being heated by hand … 0x221.asc")
 HC1/addr1 has ONLY the two HC flow sensors wired (X37, X38); every other word reads the
-2700 "not connected" sentinel. Operator warmed X37 first, then X38 — the two moving words
+2700 "not connected" sentinel. After warming X37 first and then X38, the two moving words
 rose in that order, giving an unambiguous assignment:
 
 | Register | Bytes in response | Terminal | Function (addr3) |
@@ -104,7 +104,7 @@ Each slot was set to a distinct value on the emulated addr-3 module and read off
 
 | Register | Value set | HMI shows |
 |---|---|---|
-| ch2 word0 | 30 | **buffer 4 middle** (HMI mislabels it "buffer 1 middle" — HMI-side bug) |
+| ch2 word0 | 30 | **buffer 4 middle** (displayed in the buffer *1* middle slot — see below) |
 | ch2 word1 | 31 | **buffer 4 bottom** (X36, HMI input I6) |
 | ch3 word1 | 32 | **DHW tank 4** (X39, HMI input I7) |
 | ch4 word0 | 33 | **circulation** |
@@ -119,12 +119,12 @@ HMI input numbering: I3 = X38, I4 = X37, I5 = X44, I6 = X36, I7 = X39.
 
 ### Circulation output bit (NEW)
 With the recirculation module unlocked, ch5's echo showed the output word toggling `0x0001`
-→ `0x0000` as the operator switched circulation off. **out_lo bit0 = circulation pump.**
+→ `0x0000` when circulation was switched off. **out_lo bit0 = circulation pump.**
 
 ### ch1 word0 = status flags — bits 4,5 are the LIMITING THERMOSTAT inputs (SOLVED)
 Observed: 0x221 = `0x0530`, 0x222 = `0x0500`, 0x223 (=HC1 moved to addr3) = `0x0530`.
-User confirmed HC1's limiting-thermostat inputs are **closed** (circuits 3/4) while HC2's are
-**open** (circuits 5/6) — the difference is exactly bits 4 and 5 (`0x30`).
+After confirming HC1's limiting-thermostat inputs are **closed** (circuits 3/4) while HC2's
+are **open** (circuits 5/6) — the difference is exactly bits 4 and 5 (`0x30`).
 → **bit4 = limiting thermostat closed, circuit A (3/5/7); bit5 = circuit B (4/6/8)**
 Manual §4.1.4: X9/X10 pins 4-5 must be linked if no thermostat is used. An open input almost
 certainly blocks the circuit from running — the emulator must report both bits SET.
@@ -132,7 +132,7 @@ Bits 8 and 10 (`0x0500`) are set on every module in every trace — meaning unkn
 flags?). ch5 word2 (addr1 `0x0404`, addr2 `0x0303`) still unknown, follows the module.
 
 ### Version encoding in the ident frame (SOLVED)
-User reports HC1 = HW rev **1.10**, SW **1.31**; its ident is `00 E6 4B 31 01 11 00 03`:
+HC1 reports HW rev **1.10**, SW **1.31** in its menus; its CAN ident is `00 E6 4B 31 01 11 00 03`:
 - bytes3,4 = `31 01` → BCD → **SW version 1.31**
 - byte5 = `11` → BCD → **HW revision 1.1(0)**  (HC2's `0x14` = HW rev 1.4 — different board)
 - bytes1,2 = `E6 4B` (0x4BE6) identical on both modules → module type / article code
@@ -157,7 +157,7 @@ to the other four, which started as KTY.
 Bits 2, 10, 11 are set in baseline and unexplained (other inputs?); bits 0,1,7,8,12-15 clear.
 
 Consequence: **the module does the ADC→temperature conversion**, the HMI just tells it which
-curve to use. Changing the type for the emulated module changed nothing on screen (we send
+curve to use. Changing the type for the emulated module changes nothing on screen (it sends
 finished temperatures), whereas on a real module the displayed value jumps (e.g. 36 → 23 °C).
 The emulator can safely ignore this field. It is also the best remaining candidate location
 for the emergency/boiler-state flag — worth re-diffing during a real burn.
@@ -202,8 +202,8 @@ comms dropped, the circuit was active (run emergency); if everything was off, st
 locally available, needs no protocol support, and matches the intent exactly.
 
 ## Live circuit control (trace "heating circuit 3 auto mode simulation on bench")
-Circuit 3 running, mixer travel time configured 120 s, flow setpoint 26 °C, operator hand-heating
-the flow sensor and letting it overshoot.
+Circuit 3 running, mixer travel time configured 120 s, flow setpoint 26 °C, with the flow sensor
+hand-heated and allowed to overshoot.
 - Pump 3 (`hi2`) ON for the whole active period; when the circuit was switched off the pump
   dropped and MIX3-CLOSE (`lo4`) went on continuously (HMI drives closed >2 min to reach the
   end stop; mixer motors have limit switches so this is harmless).
@@ -296,10 +296,18 @@ circuit module needs — consistent with one PCB/firmware serving several module
 (solar control, fresh water, ...). The unassigned output bits (lo1, lo7, hi0, hi1, hi4-7) are
 the likely homes for X13-open/close and X28.
 
-## ⚠ Buffer middle slot overwrites a real reading
-Setting ch2 word0 on an addr-3 module overwrites the **buffer 1 middle** sensor value shown in
-the HMI (apparently by design). Leave it at the 270 absent sentinel unless deliberately testing,
-and never populate it on the real installation.
+## ⚠ Buffer middle slot displaces another buffer's reading (HMI indexing bug)
+Populating ch2 word0 on an addr-3 module makes that value appear in the HMI's **buffer 1
+middle** field. The value itself is reported correctly — the fault is in the HMI: buffer 1 has
+no middle sensor fitted in this setup, and rather than leaving the field empty the HMI falls
+back to the next available buffer-middle sensor it can find and shows that instead. So a
+genuine reading from one buffer is displayed against a different buffer.
+
+Consequences: leave the slot at the 270 absent sentinel unless deliberately testing, and never
+populate it on a real installation — anything reading that field, whether a person or a control
+decision, would be looking at the wrong tank. Presumably the same substitution happens for other
+sensor positions when a lower-numbered tank is incompletely equipped, so this is worth keeping in
+mind for any slot, not just this one.
 
 ## Solar-family probing attempts (2026-07-29) — NOT yet successful
 Emulator pointed at poll 0x191, replying on 0x1CB (poll + 0x3A rule):
@@ -336,7 +344,7 @@ images (B&R Automation Runtime), i.e. a real RE project, not a search.
 (b) disassemble the USERROM images. Option (a) is very likely cheaper.
 
 ## Open questions / experiments needed
-1. **Emergency mode flag — the big one.** User states (from real-world experience) that HC modules
+1. **Emergency mode flag — the big one.** Field experience indicates that HC modules
    drop into an emergency routine on loss of comms — mixers open, pumps run — to dump heat when the
    boiler loses power, and that this does NOT happen when the circuits were off. Since poll bytes
    3..7 are always zero, any HMI-sent enable flag must be one of the **unassigned output-word

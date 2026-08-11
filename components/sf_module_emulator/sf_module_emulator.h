@@ -37,7 +37,7 @@ static constexpr uint32_t SF_OUTPUT_DEBOUNCE_MS = 100;
 // Populating them unlocks buffer tank, DHW tank and recirculation functions.
 static constexpr int SF_NUM_AUX = 7;
 enum SfAux {
-  SF_AUX_BUFFER_MID = 0,  // ch2 word0 - HMI mislabels this "buffer 1 middle"
+  SF_AUX_BUFFER_MID = 0,  // ch2 word0 - buffer middle; see note on HMI indexing
   SF_AUX_BUFFER_BOT,      // ch2 word1 - X36 lower buffer sensor (HMI input I6)
   SF_AUX_DHW_TANK,        // ch3 word1 - X39 DHW tank sensor (HMI input I7)
   SF_AUX_CIRCULATION,     // ch4 word0 - recirculation sensor
