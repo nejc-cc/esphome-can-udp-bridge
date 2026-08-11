@@ -184,7 +184,8 @@ binary sensors and can drive relays.
 The protocol — addressing, registers, sensor encoding and sentinels, output bit
 map, sensor-type configuration, discovery handshake — is written up in
 [`docs/solarfocus-protocol-notes.md`](docs/solarfocus-protocol-notes.md),
-including the negative results.
+including the negative results. The captures each finding was derived from are
+in [`docs/traces/`](docs/traces/), so the decode can be verified independently.
 
 Beware three overlapping numbering systems for one module: the rotary **device
 address** (3), the **heating circuits** it serves (7 and 8), and what the
