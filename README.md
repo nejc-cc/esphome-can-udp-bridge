@@ -10,12 +10,39 @@ Two ESPHome external components:
   hardware that does not exist.
 
 Built to link a Solarfocus boiler display to a remote heating-circuit module
-across buildings without running new CAN cable, then extended to emulate an
-extra module. The bridge itself is protocol-agnostic and works with any
-classic CAN bus.
+across buildings, then extended to emulate an extra module. The bridge itself
+is protocol-agnostic and works with any classic CAN bus.
 
 > Reverse-engineered from a specific installation. Not affiliated with or
 > endorsed by SOLARFOCUS. Read the safety notes before driving real hardware.
+
+## Why
+
+Lightning. The original installation ran the CAN bus between two buildings on
+copper, and a nearby strike only has to find one path to take out everything
+attached to it. Over the years this destroyed Solarfocus electronics **more
+than eight times** — display, power element, heating-circuit modules — each
+one either an evening of fault-finding or an expensive replacement.
+
+A CAN bus is a galvanically continuous wire between buildings, so every
+strike gets a free ride along it. Replacing that run with a network hop breaks
+the path:
+
+```
+before:  building A ══════ copper CAN ══════ building B      one surge path
+after:   building A ── CAN ── [ESP32] ── LAN/fibre ── [ESP32] ── CAN ── building B
+                                        ↑
+                          Ethernet magnetics, or full optical
+                          isolation if the hop runs over fibre
+```
+
+Each CAN segment now ends at an ESP32 a few metres from the equipment it
+serves. Ethernet's transformer coupling already provides isolation, and if the
+inter-building hop runs over fibre (media converters at each end) there is no
+electrical path between the buildings at all.
+
+That the same hardware could then *pretend* to be a heating-circuit module was
+a bonus discovered along the way.
 
 ## What works
 
