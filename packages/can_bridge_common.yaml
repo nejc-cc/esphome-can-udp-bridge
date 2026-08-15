@@ -39,6 +39,14 @@ substitutions:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
+  on_boot:
+    # Re-apply the restored sniffer settings; the component starts with
+    # mirroring off and no target until told otherwise.
+    priority: -200
+    then:
+      - lambda: |-
+          id(can_bridge).set_mirror_ip(id(sniffer_ip).state);
+          id(can_bridge).set_mirror_enabled(id(sniffer_enable).state);
 
 esp32:
   board: ${board}
@@ -152,6 +160,53 @@ interval:
             - output.turn_on: led_peer
           else:
             - output.turn_off: led_peer
+
+# Live CAN sniffer: mirrors every frame from this segment to a host running
+# tools/can_recorder.py. Send-only — frames from that address are never
+# accepted, so a listener cannot inject onto the CAN bus, and peer_alive is
+# unaffected. Both controls are runtime, no recompile needed.
+switch:
+  - platform: template
+    name: "CAN Sniffer"
+    id: sniffer_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    turn_on_action:
+      - lambda: id(can_bridge).set_mirror_enabled(true);
+    turn_off_action:
+      - lambda: id(can_bridge).set_mirror_enabled(false);
+
+text:
+  - platform: template
+    name: "CAN Sniffer Target IP"
+    id: sniffer_ip
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    min_length: 0
+    max_length: 15
+    mode: text
+    entity_category: config
+    set_action:
+      - lambda: id(can_bridge).set_mirror_ip(x);
+
+text_sensor:
+  # Visible feedback for the sniffer: the IP field accepts any string, so say
+  # plainly whether it parsed and whether anything is actually being sent.
+  - platform: template
+    name: "CAN Sniffer Status"
+    id: sniffer_status
+    entity_category: diagnostic
+    update_interval: 2s
+    lambda: |-
+      if (!id(can_bridge).get_mirror_enabled())
+        return std::string("off");
+      if (id(can_bridge).get_mirror_ip().empty())
+        return std::string("no target set");
+      if (!id(can_bridge).is_mirror_ip_valid())
+        return std::string("invalid IP: " + id(can_bridge).get_mirror_ip());
+      return std::string("sending to " + id(can_bridge).get_mirror_ip());
 
 sensor:
   - platform: uptime

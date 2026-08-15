@@ -43,7 +43,7 @@ ethernet:
 can_udp_bridge:
   peers:
     - !secret ip_sfcantunnel1
-    - !secret ip_sfcantunnel3
+#    - !secret ip_sfcantunnel3
 
 api:
   encryption:
