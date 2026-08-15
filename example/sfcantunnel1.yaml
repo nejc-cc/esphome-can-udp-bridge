@@ -12,9 +12,14 @@ substitutions:
   eth_clk_pin: "0"
   eth_phy_addr: "1"
   eth_power_pin: GPIO16
-  # --- CAN transceiver wiring (SN65HVD230: TX->D/CTX, RX<-R/CRX) ---
-  can_tx_pin: "14"
-  can_rx_pin: "4"
+  # --- CAN transceiver wiring (SN65HVD230) ---
+  # NOTE: SWAPPED vs the reference wiring on purpose. D/CTX and R/CRX are
+  # mirrored on this home-made carrier PCB, so TX must drive GPIO4 and RX must
+  # read GPIO14. Not a typo - do not "fix" it back without checking the board.
+  # Symptom if it is wrong: CAN RX Rate 0 AND Bus Errors 0 (a wiring fault that
+  # produced garbage would show errors climbing instead).
+  can_tx_pin: "4"
+  can_rx_pin: "14"
   # --- tunnel behaviour ---
   can_bit_rate: "100000"
   can_mode: bridge               # bridge | listen_only
@@ -43,7 +48,7 @@ ethernet:
 can_udp_bridge:
   peers:
     - !secret ip_sfcantunnel2
-    - !secret ip_sfcantunnel3
+#    - !secret ip_sfcantunnel3
 
 
 

@@ -103,6 +103,18 @@ class CanUdpBridge : public Component {
   void request_mode(BridgeMode m);
   void reset_counters();  // zero all diagnostic counters (main loop context)
 
+  // --- read-only mirror (sniffer) target ---
+  // When enabled, every datagram sent to the peers also goes to this address.
+  // It is deliberately NOT a peer: packets arriving from it are ignored, so a
+  // sniffer can never inject onto the CAN bus, and it has no effect on
+  // peer_alive. Both settable at runtime, e.g. from a switch and a text input.
+  void set_mirror_enabled(bool en) { mirror_enabled_.store(en); }
+  void set_mirror_ip(const std::string &raw);
+  bool get_mirror_enabled() const { return mirror_enabled_.load(); }
+  // Whether the configured mirror address parsed as a valid dotted quad.
+  bool is_mirror_ip_valid() const { return mirror_ip_valid_; }
+  std::string get_mirror_ip() const { return mirror_ip_str_; }
+
   // Attach a frame responder (e.g. sf_module_emulator). Call before setup().
   void add_responder(CanFrameResponder *r) {
     if (this->responder_count_ < MAX_RESPONDERS)
@@ -179,6 +191,12 @@ class CanUdpBridge : public Component {
   SemaphoreHandle_t last_frame_mutex_{nullptr};
   char last_frame_str_[80]{};
   std::atomic<bool> last_frame_dirty_{false};
+
+  // --- read-only mirror target ---
+  std::atomic<bool> mirror_enabled_{false};
+  std::atomic<uint32_t> mirror_addr_{0};  // network byte order, 0 = unset
+  std::string mirror_ip_str_;             // main-loop only, for status display
+  bool mirror_ip_valid_{false};           // main-loop only
 
   // --- attached frame responders ---
   CanFrameResponder *responders_[MAX_RESPONDERS]{};

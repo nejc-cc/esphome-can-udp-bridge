@@ -91,6 +91,47 @@ void CanUdpBridge::dump_config() {
   ESP_LOGCONFIG(TAG, "  Frame responders: %u", this->responder_count_);
 }
 
+// Strict dotted-quad parse. inet_aton() is deliberately not used here: it
+// accepts "192.168.2" (as 192.168.0.2), "127.1" and hex forms, so a typo would
+// silently mirror to the wrong host instead of being rejected.
+static bool parse_ipv4(const std::string &s, uint32_t &out) {
+  unsigned a, b, c, d;
+  char trailing;
+  // %c catches trailing junk: a clean address matches exactly 4 fields
+  if (sscanf(s.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &trailing) != 4)
+    return false;
+  if (a > 255 || b > 255 || c > 255 || d > 255)
+    return false;
+  out = htonl((a << 24) | (b << 16) | (c << 8) | d);
+  return true;
+}
+
+void CanUdpBridge::set_mirror_ip(const std::string &raw) {
+  // Trim surrounding whitespace: a pasted address often carries a trailing
+  // space, and rejecting it as "invalid" would be baffling.
+  const size_t b = raw.find_first_not_of(" \t\r\n");
+  const size_t e = raw.find_last_not_of(" \t\r\n");
+  const std::string ip = (b == std::string::npos) ? "" : raw.substr(b, e - b + 1);
+
+  this->mirror_ip_str_ = ip;
+  if (ip.empty()) {
+    this->mirror_addr_.store(0);
+    this->mirror_ip_valid_ = false;
+    return;
+  }
+  uint32_t addr = 0;
+  if (!parse_ipv4(ip, addr)) {
+    ESP_LOGW(TAG, "Mirror IP '%s' is not a valid address — nothing will be sent",
+             ip.c_str());
+    this->mirror_addr_.store(0);
+    this->mirror_ip_valid_ = false;
+    return;
+  }
+  this->mirror_addr_.store(addr);
+  this->mirror_ip_valid_ = true;
+  ESP_LOGI(TAG, "Mirror target: %s:%u", ip.c_str(), this->port_);
+}
+
 void CanUdpBridge::request_bit_rate(uint32_t bps) {
   ESP_LOGI(TAG, "Bit rate change requested: %" PRIu32 " bps", bps);
   this->pending_bitrate_.store(bps);
@@ -344,6 +385,20 @@ void CanUdpBridge::batch_flush_() {
                                 sizeof(this->peers_[i].addr));
     if (sent < 0)
       this->udp_send_err_.fetch_add(1);
+  }
+
+  // ...and to the mirror target, if a sniffer is listening. Send-only: nothing
+  // from that address is ever accepted, so it cannot reach the CAN bus.
+  if (this->mirror_enabled_.load()) {
+    const uint32_t maddr = this->mirror_addr_.load();
+    if (maddr != 0) {
+      struct sockaddr_in mirror {};
+      mirror.sin_family = AF_INET;
+      mirror.sin_port = htons(this->port_);
+      mirror.sin_addr.s_addr = maddr;
+      sendto(this->sock_, this->udp_buf_, this->udp_len_, 0, (struct sockaddr *) &mirror,
+             sizeof(mirror));
+    }
   }
   this->last_udp_tx_us_ = esp_timer_get_time();
   this->udp_frame_count_ = 0;

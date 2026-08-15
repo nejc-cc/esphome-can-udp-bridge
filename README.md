@@ -142,6 +142,28 @@ Header `{version=2, op_code=0, seq_no, count(u16 BE)}`, then per frame
 `tools/can_recorder.py` decodes the same framing straight to a timestamped log
 with inter-frame deltas, without needing SocketCAN.
 
+## Capturing a bus remotely
+
+Any node can mirror its segment to a listening host, so a bus can be recorded
+without going near it. Both controls are runtime — no recompile, no reflash:
+
+- **CAN Sniffer** (switch) — start/stop mirroring
+- **CAN Sniffer Target IP** (text) — where to send it
+
+Then on the listening host:
+
+```bash
+python tools/can_recorder.py <node-1-ip> <node-2-ip> --asc capture.asc
+```
+
+Pass **every** node: a bridge forwards only what it hears on its own segment,
+so one node alone shows you half the conversation.
+
+The mirror is deliberately not a peer. Frames arriving from the mirror address
+are still ignored, so a listener can never inject onto the CAN bus, and
+`peer_alive` is unaffected — adding a recorder to `peers:` instead would make
+every node report a missing peer and trip any alerting built on it.
+
 ## Design notes
 
 **Per-frame forwarding is mandatory for request/response protocols.** The
