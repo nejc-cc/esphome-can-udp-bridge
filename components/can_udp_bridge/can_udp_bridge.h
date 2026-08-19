@@ -115,6 +115,16 @@ class CanUdpBridge : public Component {
   bool is_mirror_ip_valid() const { return mirror_ip_valid_; }
   std::string get_mirror_ip() const { return mirror_ip_str_; }
 
+  // --- tunnel enable (test aid) ---
+  // When disabled this node puts NOTHING on its local CAN segment: neither
+  // frames received from peers nor emulator replies. It keeps listening, so
+  // local traffic is still forwarded to peers and to the sniffer mirror.
+  // Used to simulate a tunnel outage for a device on the far segment while
+  // still being able to record what happens. Defaults to enabled, and the YAML
+  // switch is ALWAYS_ON at boot so a forgotten test cannot survive a reboot.
+  void set_tunnel_enabled(bool en) { tunnel_enabled_.store(en); }
+  bool get_tunnel_enabled() const { return tunnel_enabled_.load(); }
+
   // Attach a frame responder (e.g. sf_module_emulator). Call before setup().
   void add_responder(CanFrameResponder *r) {
     if (this->responder_count_ < MAX_RESPONDERS)
@@ -191,6 +201,8 @@ class CanUdpBridge : public Component {
   SemaphoreHandle_t last_frame_mutex_{nullptr};
   char last_frame_str_[80]{};
   std::atomic<bool> last_frame_dirty_{false};
+
+  std::atomic<bool> tunnel_enabled_{true};
 
   // --- read-only mirror target ---
   std::atomic<bool> mirror_enabled_{false};

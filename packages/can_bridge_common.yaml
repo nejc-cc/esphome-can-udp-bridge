@@ -166,6 +166,28 @@ interval:
 # accepted, so a listener cannot inject onto the CAN bus, and peer_alive is
 # unaffected. Both controls are runtime, no recompile needed.
 switch:
+  # TEST AID: mute this node's CAN transmit path. While off, nothing from the
+  # tunnel (and nothing from an emulator) is put on the local segment, so a
+  # device on this segment sees a communication outage - while the node keeps
+  # listening, so sniffing and diagnostics carry on recording what it does.
+  #
+  # ALWAYS_ON on purpose: this disables a heating system's control path, and a
+  # forgotten test must not survive a reboot.
+  - platform: template
+    name: "Tunnel Enabled (test)"
+    id: tunnel_enable
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    entity_category: config
+    turn_on_action:
+      - lambda: |-
+          id(can_bridge).set_tunnel_enabled(true);
+          ESP_LOGI("test", "Tunnel ENABLED - local CAN segment driven normally");
+    turn_off_action:
+      - lambda: |-
+          id(can_bridge).set_tunnel_enabled(false);
+          ESP_LOGW("test", "Tunnel MUTED - this segment now sees a comms outage");
+
   - platform: template
     name: "CAN Sniffer"
     id: sniffer_enable
@@ -200,6 +222,9 @@ text_sensor:
     entity_category: diagnostic
     update_interval: 2s
     lambda: |-
+      if (!id(can_bridge).get_tunnel_enabled())
+        return std::string("TUNNEL MUTED (test) - sniffer " +
+                           std::string(id(can_bridge).get_mirror_enabled() ? "on" : "off"));
       if (!id(can_bridge).get_mirror_enabled())
         return std::string("off");
       if (id(can_bridge).get_mirror_ip().empty())
