@@ -385,6 +385,33 @@ Zero simultaneous open+close commands in five hours, on either circuit. Useful t
 a substitute for a hardware interlock: that protects against firmware or emulator faults, which
 protocol correctness says nothing about.
 
+## PENDING EXPERIMENT: what actually triggers a module's emergency mode
+
+The modules are known from field experience to run pumps and open mixers when communication is
+lost — but only when the system was active, not when it was idle. Since the protocol carries no
+boiler state (see the burn capture above), the module must infer this locally. Two candidate
+rules make *different* predictions, so the timing of the test decides whether it is informative:
+
+| Rule | Prediction if comms are cut just after a Stop command, while the pump still runs |
+|---|---|
+| A: module somehow knows boiler state | no emergency (the boiler is stopping) |
+| B: module infers from its own last commanded outputs | **emergency** (the pump was running) |
+
+Rule A has no mechanism in the observed protocol, so B is expected — but it has not been observed
+directly. Note that after a Stop command the circulating pump was still commanded on for at least
+the following 78 s, which is what makes this window discriminating.
+
+Method: mute the tunnel on the module's segment (the "Tunnel Enabled (test)" switch) and watch
+the relays. Muting withholds transmit only, so the capture keeps running throughout. Three cases:
+
+1. circuit active, boiler burning — expect emergency; confirms the basic claim
+2. just after Stop, pump still running — **the discriminating case**
+3. circuit fully off — both rules predict nothing; useful only as a control
+
+Also measure **how long** the module waits before reacting: that timeout is what an emulator has
+to reproduce. Do this with someone present at the boiler — while muted, the controller has no
+authority over that circuit.
+
 ## Open questions / experiments needed
 1. ~~**Emergency mode flag**~~ — ANSWERED, see the five-hour burn capture above: no flag
    exists in the protocol; the behaviour is module-local. Original note retained for context:
