@@ -165,6 +165,8 @@ void CanUdpBridge::dispatch_responders_(uint32_t id, const uint8_t *data, uint8_
     memset(&reply, 0, sizeof(reply));
     if (!this->responders_[i]->handle_frame(id, data, len, reply))
       continue;
+    if (!this->tunnel_enabled_.load())
+      continue;  // node is muted for a tunnel-outage test
     twai_transmit(&reply, pdMS_TO_TICKS(10));
     this->batch_append_(reply);
     this->batch_flush_();
@@ -610,8 +612,8 @@ void CanUdpBridge::handle_udp_payload_(const uint8_t *buf, size_t len, PeerState
     }
 
     if (static_cast<BridgeMode>(this->pending_mode_.load()) != BridgeMode::BRIDGE ||
-        !this->driver_ok_.load())
-      continue;  // listen-only or driver reconfiguring: consume, don't transmit
+        !this->driver_ok_.load() || !this->tunnel_enabled_.load())
+      continue;  // listen-only, reconfiguring or tunnel disabled: consume only
     if (twai_transmit(&msg, pdMS_TO_TICKS(10)) == ESP_OK) {
       this->can_tx_total_.fetch_add(1);
     } else {
