@@ -343,8 +343,52 @@ images (B&R Automation Runtime), i.e. a real RE project, not a search.
     real reply ID and the real ident, exactly as the address-3 capture did for HC3;
 (b) disassemble the USERROM images. Option (a) is very likely cheaper.
 
+## Five-hour capture during a real burn (2026-08-19, screed-drying programme)
+
+17907 s / 3.55 M frames, recorded through the tunnel mirror while the boiler was lit and one
+heating circuit ran a screed-drying programme (interrupted and restarted at a higher setpoint).
+Only module address 1 was in service, so the trace is a clean picture of one real module.
+
+### The HMI does all the control — the module cannot regulate
+The poll frame `[ch, out_lo, out_hi, 0,0,0,0,0]` carries **no setpoint, no target temperature
+and no control parameters**, and none appeared in five hours of active regulation. The module is
+never told what temperature to aim for; it reports sensors and switches relays. All control law
+lives in the HMI, so an emulator never needs to implement one.
+
+### No emergency flag exists in the protocol (NEGATIVE RESULT — hypotheses closed)
+Through ignition, five hours of operation and a programme restart:
+- the ch0 config word never changed after the initial sensor-type edits (constant `0x0E0C`);
+- no new output-word bit ever appeared (only lo2, lo5, lo6, hi3 were ever seen).
+
+Both leading candidates are therefore eliminated. The modules' known emergency behaviour on
+loss of communication must be **decided locally by the module from its own last commanded output
+state** — active when comms drop means run, idle means stay idle. That is what an emulator should
+implement; there is nothing to listen for.
+
+### Sensor-type bitmask confirmed independently
+Switching X37 and X38 from KTY81-110 to PT1000 cleared exactly bits 4 and 5
+(`0x0E3C` → `0x0E2C` → `0x0E0C`), and X38's reported value jumped 36.1 → 21.9 °C at that moment
+— matching the 36 → 23 °C shift seen when the type was toggled on the bench.
+
+### Mixer control law
+- The atomic step is a **3.1 s pulse** (dominant width for both directions). At the configured
+  120 s full travel that is ~2.6 % of position per pulse.
+- The controller varies the **interval between pulses, not their width** — three-point step
+  control, not continuous modulation.
+- After ~25 minutes of finding the working point, the mixer was almost idle for four hours:
+  three isolated pulses while flow held 29.5–30.5 °C. The circulating pump ran 99.5 % of the time.
+- The "15 s" drive periods in the pulse statistics are not control action, they are the 15 s
+  output-word blanking cutting a continuous command into pieces.
+
+### Open/close never commanded together
+Zero simultaneous open+close commands in five hours, on either circuit. Useful to know, but not
+a substitute for a hardware interlock: that protects against firmware or emulator faults, which
+protocol correctness says nothing about.
+
 ## Open questions / experiments needed
-1. **Emergency mode flag — the big one.** Field experience indicates that HC modules
+1. ~~**Emergency mode flag**~~ — ANSWERED, see the five-hour burn capture above: no flag
+   exists in the protocol; the behaviour is module-local. Original note retained for context:
+   **Emergency mode flag.** Field experience indicates that HC modules
    drop into an emergency routine on loss of comms — mixers open, pumps run — to dump heat when the
    boiler loses power, and that this does NOT happen when the circuits were off. Since poll bytes
    3..7 are always zero, any HMI-sent enable flag must be one of the **unassigned output-word
