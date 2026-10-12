@@ -57,13 +57,15 @@ def keepalive_loop(sock, peers, port, stop):
         stop.wait(KEEPALIVE_INTERVAL)
 
 
-def asc_header(fh, when):
+def asc_header(fh, when, peers):
     stamp = when.strftime("%a %b %d %I:%M:%S.") + f"{when.microsecond // 1000:03d}" \
             + when.strftime(" %p %Y").lower().replace("am", "am").replace("pm", "pm")
     fh.write(f"date {stamp}\n")
     fh.write("base hex  timestamps absolute\n")
     fh.write("internal events logged\n")
     fh.write("// can_udp_bridge tools/can_recorder.py\n")
+    for i, ip in enumerate(peers):
+        fh.write(f"// channel {i + 1} = {ip}\n")
     fh.write(f"Begin Triggerblock {stamp}\n")
     fh.write("   0.000000 Start of measurement\n")
 
@@ -78,6 +80,8 @@ def main():
     ap.add_argument("--no-keepalive", action="store_true",
                     help="do not announce liveness (bridges report peer_alive false)")
     ap.add_argument("--quiet", action="store_true", help="do not print frames")
+    ap.add_argument("--duration", type=float, metavar="SECONDS",
+                    help="stop by itself after this long (unattended captures)")
     args = ap.parse_args()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -94,11 +98,16 @@ def main():
     asc = None
     if args.asc:
         asc = open(args.asc, "w", buffering=1, encoding="utf-8")
-        asc_header(asc, started)
+        asc_header(asc, started, args.peers)
 
     print(f"listening on UDP :{args.port}, recording from {', '.join(args.peers)}"
           f"{' -> ' + args.asc if args.asc else ''}   (Ctrl-C to stop)",
           file=sys.stderr)
+    # A bridge mirrors only what it hears on its OWN CAN segment, so the source
+    # address says which segment a frame was transmitted on - worth keeping in
+    # the trace: peer N becomes ASC channel N+1.
+    for i, ip in enumerate(args.peers):
+        print(f"  channel {i + 1} = {ip}", file=sys.stderr)
 
     t0 = time.time()
     frames = keepalives = lost = 0
@@ -107,6 +116,8 @@ def main():
 
     try:
         while True:
+            if args.duration and time.time() - t0 >= args.duration:
+                break
             try:
                 data, addr = sock.recvfrom(2048)
             except socket.timeout:
@@ -114,6 +125,7 @@ def main():
             src = addr[0]
             if src not in args.peers:
                 continue
+            chan = args.peers.index(src) + 1
             now = time.time()
             if len(data) < 5 or data[0] != CNL_VERSION or data[1] != CNL_OP_DATA:
                 continue
@@ -155,7 +167,7 @@ def main():
                           f"{dlc}  {payload.hex(' ').upper()}")
                 if asc:
                     hexbytes = " ".join(f"{b:02X}" for b in payload)
-                    asc.write(f"{rel:11.6f} 1  {can_id:x}             Rx   d {dlc} "
+                    asc.write(f"{rel:11.6f} {chan}  {can_id:x}             Rx   d {dlc} "
                               f"{hexbytes}\n")
                 prev_t = now
                 frames += 1
