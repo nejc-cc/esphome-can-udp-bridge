@@ -218,6 +218,8 @@ Seen on the pump while running and on the close relay while parked (t=3.92, 18.9
 63.95, 78.97, 93.97 — spacing 15.00±0.01 s). Presumably a watchdog/refresh handshake.
 → The emulator must **filter output pulses shorter than ~100 ms** before driving physical relays,
 otherwise every relay chatters every 15 s. (Real modules evidently ride through it.)
+There is a second, longer blanking - up to ~0.4 s - whenever the HMI restarts a module's session
+after a missed reply; see "A missed reply makes the HMI restart the module's session".
 
 ## Limiting thermostat bits (CONFIRMED by direct experiment)
 Trace "removing HC1 limiting thermostat bridge on X9 on 0x221": pulling the X9 bridge cleared
@@ -267,6 +269,9 @@ plausibly the fresh-water modules. (0x1B7 is a single ID whose payload merely ha
 config-frame *shape*; it can't be a 4-address family.)
 The component accepts `poll_id:`/`reply_id:` overrides in `emulate_module:` for probing these.
 
+> **Superseded 2026-09-16** for 0x191-0x19E: replies there are poll + 0x16, not + 0x3A, and the
+> single 0x1B7 is in fact 0x1B7-0x1B9. See "The second module family" below.
+
 ### Solar control module (SCM) pinout — manual §5.1.1
 | Terminal | Function |
 |---|---|
@@ -309,7 +314,7 @@ decision, would be looking at the wrong tank. Presumably the same substitution h
 sensor positions when a lower-numbered tank is incompletely equipped, so this is worth keeping in
 mind for any slot, not just this one.
 
-## Solar-family probing attempts (2026-07-29) — NOT yet successful
+## Solar-family probing attempts (2026-07-29) — NOT yet successful (RESOLVED 2026-09-16, see below)
 Emulator pointed at poll 0x191, replying on 0x1CB (poll + 0x3A rule):
 1. Reply `00 E6 4B 31 01 11 00 01` (heating-circuit ident): 195 polls, 195 replies, HMI never
    escalated past the ch0 probe. Heard but not accepted.
@@ -328,6 +333,8 @@ at 320 ms and proves nothing if the reply ID was wrong all along.
    and solar 1-4, so positions 1-3 would be ambiguous if the rotary chose the role. Roles are
    firmware-baked; the shared PCB (third mixer, spare relay, unpopulated inputs) is just cost
    engineering.
+   *Refined 2026-09-16:* true between the two hardware families, but within the second family
+   the rotary position is exactly what selects the role - see below.
 
 **Remaining realistic option for solar emulation:** obtain a real solar module and capture its
 ident — one 5-minute capture yields both the real reply ID and the real ident, exactly as the
@@ -402,6 +409,113 @@ Also measure **how long** the module waits before reacting: that timeout is what
 to reproduce. Do this with someone present at the boiler — while muted, the controller has no
 authority over that circuit.
 
+## The second module family: the 0x190 block (SOLVED 2026-09-16 with a real solar module)
+A genuine Solarfocus solar module settled what the probing attempts above could not. It sat on a
+segment of its own behind a tunnel node and was moved through its rotary positions, with a
+network scan started by hand each time (the HMI never adopts a module by itself). The captures
+behind this section and the next are not among the published traces.
+
+**Addressing: poll = 0x190 + rotary position, reply = poll + 0x16.** Observed at six positions:
+
+| rotary | poll | reply | what the scan calls it |
+|---|---|---|---|
+| 1 | 0x191 | 0x1A7 | solar module 1 |
+| 5 | 0x195 | 0x1AB | fresh water module 1, with recirculation |
+| 9 | 0x199 | 0x1AF | suction probe switch unit |
+| A | 0x19A | 0x1B0 | differential control module 1, two control loops |
+| B | 0x19B | 0x1B1 | differential control module 2 |
+| E | 0x19E | 0x1B4 | room air module |
+
+Polls 0x191-0x19E and replies 0x1A7-0x1B4 are two contiguous blocks of fourteen. Going by the
+HMI's own grouping (ch0 poll byte 2, below), positions 1-4 are solar, 5-8 fresh water and 9-E the
+rest; 2-4, 6-8, C and D were not tried one by one.
+
+- **The +0x3A rule does not generalise.** The predicted replies in the table further up are wrong
+  for this block, and both unknowns of the July probing were wrong at once: the reply ID (0x1CB
+  instead of 0x1A7) and the type code.
+- **Ident is `00 E6 4C 30 01 10 00 <rotary>` in every role**: type code **0x4CE6** (heating
+  circuit: 0x4BE6), SW 1.30, HW 1.0, byte 7 = rotary position. Nothing in it changes with the
+  role, so the HMI takes the role from the address alone.
+- **The two families cannot collide** even on the same rotary position, because they answer
+  different ID blocks (0x1E6+n and 0x190+n). A German edition of the manual lists positions B, C,
+  D as "Erweiterungspaket für Pufferspeicher- und Trinkwasserspeicher-Ladekreis"; this module
+  identified as differential control module 2 at B, so that row presumably describes other
+  hardware. Untested.
+- **ch0 poll byte 2 is a class the HMI sends per address group:** 0x03 for 0x191-0x194, 0x02 for
+  0x195-0x198, 0x00 for 0x199-0x19E (and for the heating-circuit block).
+- **Channels:** 00-05, 07, A0-A2 in every role but one; 06 is never polled in those. The suction
+  probe role (rotary 9) is polled on 00, **06**, A0-A2 only; its ch6 reply is `C8 00` then zeros,
+  and its A0 reply begins `03 40` rather than `03 00`.
+- **ch1 word0 = 0x0500** (heating-circuit module: 0x0530).
+- **Sensor slots, the same in every role tried:** ch1.w1 = i1, ch1.w2 = i2, ch2.w0 = i3,
+  ch2.w1 = i4, ch2.w2 = i5, ch3.w0 = i9; ch3.w1 and ch3.w2 are never used. Established twice
+  over: with only i1 and i3 connected exactly those two slots were live, and 1 kΩ resistors on i4
+  and i9 read -2.9 and -0.8 °C in exactly those two slots (1 kΩ is 0 °C on a PT1000 input).
+- **Both sentinels appear, with distinct meanings here:** +2700 = input used by the role, nothing
+  connected; -3000 = slot not in use, or not measured yet. Two slots went from -3000 to +2700
+  about five seconds after the module began answering, as the HMI activated the role.
+- **ch4 and ch5 are not sensor inputs:** ch4 = ~10001, ~10002 (noisy by ±8), ~2165; ch5 = 0, 0,
+  9999. Populating every input changed none of them. Meaning unknown; the heat meter input (i15)
+  is the obvious thing left to try.
+- **Commands seen.** Solar role, once adopted: poll bytes 2-5 on ch1-ch4 carry `F4 01 F4 01` (500
+  twice, plausibly the two pump control signals at 50.0 %), and the module echoes 500 in ch7
+  word0. Fresh water role: ch1-ch4 `00 FF 00 00 00 11 00`, ch5 `00 31 F4 01 64 64 03`, ch7
+  `00 00 FF 00 00 00 00` (poll bytes 1-7), with 0xFF echoed in ch7 word0. Differential control
+  with nothing to do: all zero.
+- **Still unidentified in the scan:** 0x1B7-0x1B9 (three IDs with class byte 0x03 *and* the
+  heating-circuit style config tail), 0x1C4/0x1C5, 0x1F4/0x1F5, 0x770, 0x7B9-0x7C0, 0x090.
+
+Emulating this family needs only the ID pair, the ident above and the slot layout; the role
+follows from the address. Not implemented yet: `sf_module_emulator` still limits `address` to 1-4
+and answers with the heating-circuit register layout.
+
+## A missed reply makes the HMI restart the module's session (2026-10-08)
+The relay clicks that arrived with the tunnel turned out to be this. It is HMI behaviour, so
+anything standing in for a module has to expect it.
+
+**What happens.** After a poll that gets no reply the HMI treats that one module as gone: it stops
+polling it, sends the ch0 ident probe ~260 ms later (the "where did you go" cadence from the
+power-loss capture above) and on the answer re-enters as described there, except that the first
+round or more of polls carries **output word 0x0000**. Typically about nine polls (~90 ms), 430 ms
+at most in five hours. Then the outputs come back, and every relay on that module has dropped out
+and picked up again.
+- ch0 is polled at no other time: in the five-hour burn capture all 252 pauses longer than 200 ms
+  ended in a ch0 poll, out of 256 ch0 polls in total.
+- It is per module; two modules are restarted at independent moments.
+- The module signals nothing beforehand: its status word and A0-A2 replies never changed.
+
+**It is the missing reply, not a late one.** An A/B on one day, same emulator firmware both times:
+
+| emulated module 3 answers | its restarts | the two real modules behind the tunnel meanwhile |
+|---|---|---|
+| through the tunnel, 28 min | 12 | 12 and 11 |
+| on the HMI's own segment, 30 min | **0** | 18 and 20 |
+
+- The last poll before a restart went unanswered in 25 of 73 cases (34 %). An arbitrary poll does
+  so less than 0.01 % of the time.
+- Replies later than 10 ms are no more common before a restart than at any other moment, and
+  replies tens of milliseconds late occur without consequence.
+- The remaining two thirds are presumably replies lost on the way back to the HMI. A capture
+  cannot show those: every node mirrors to the recording host separately, so a reply that never
+  reached the HMI's node still reaches the recorder.
+- The rate fits: about 25 restarts an hour per module, on a tunnel that lost 0.002-0.004 % of its
+  datagrams.
+
+**Fixed in the bridge, not the emulator:** every datagram is sent a second time 5 ms later and the
+receiver keeps the first to arrive; the UDP receive mailbox went from lwIP's default 6 to 32. In
+the first half hour afterwards there were 5 restarts across three modules instead of ~35, all
+within eleven minutes of the nodes being reflashed and none in the nineteen after, and 4 of
+373,000 polls without a reply. None of those five had an unanswered poll before it; whether they
+were replies lost in both copies or the HMI settling after three node reboots is open.
+
+**For an emulator's relay driver** this is a second, longer blanking than the 15-second one: up to
+~0.4 s of zeros. A 100 ms filter rides through the first and not always the second.
+
+**Analysing two-sided captures.** Timestamps are arrival times at the recording host. With the
+copies in place, the mirror from the HMI-side node is logged after the reply it provoked for 3-4 %
+of polls, so a reply has to be matched in a window on both sides of its poll. A forward-only match
+reads those as missing replies; it produced a phantom 0.6-3 % "loss" here before being corrected.
+
 ## Open questions / experiments needed
 1. ~~**Emergency mode flag**~~ — ANSWERED, see the five-hour burn capture above: no flag
    exists in the protocol; the behaviour is module-local. Original note retained for context:
@@ -420,11 +534,15 @@ authority over that circuit.
    closing tail. Shows pulse cadence/duty during normal modulation.
 5. **Module unplugged mid-operation** — how fast the HMI notices, what it retries, what it alarms.
    Informs how the emulator should behave when *it* is the one that drops out.
+   *Partly answered 2026-10-08:* it notices after a single missed reply. Alarm thresholds are
+   still unknown.
 6. Remaining sensor words (ch3.w1, ch4.w2, ch5.w0) if buffer/DHW emulation is ever wanted.
 
 ## Tunnel performance context
 - 9300 s production soak through can_udp_bridge: 22 + 41 lost UDP packets of ~930k/direction
-  (0.002–0.004%) = one lost 15 ms poll per ~4 min. Accepted.
+  (0.002–0.004%) = one lost 15 ms poll per ~4 min. Accepted at the time - wrongly: every one
+  of those costs a session restart and a relay click. Each datagram is now sent twice; see the
+  session-restart section.
 - Emulating a module *behind* the tunnel adds ~2 ms each way to its responses; real modules answer
   ≪1 ms. Poll period is 15 ms and probe retry ~700 ms, so there should be ample margin — but this
   is the one timing risk worth verifying early.
