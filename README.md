@@ -48,12 +48,14 @@ a bonus discovered along the way.
 
 - Per-frame forwarding, ~2 ms added latency each way
 - Full mesh, up to 4 peers per node
-- Measured 0.002–0.004 % UDP frame loss over a 9300 s soak (~930k frames per
-  direction), zero CAN bus errors
+- Every datagram is sent twice a few milliseconds apart, so one lost packet
+  does not reach the bus: a 30-minute capture left 4 of 373,000 polls
+  unanswered. A single copy lost 0.002–0.004 % on the same link, which mattered
+  far more than it looks — see the design notes. Zero CAN bus errors
 - Self-healing: bus-off recovery, driver reinstall if TWAI wedges, automatic
   reconnect after power or link loss (~5 s)
 - Diagnostics in Home Assistant: RX/TX rates, bus errors, missed frames,
-  tunnel packet loss, per-peer liveness, bus state, last frame
+  tunnel packets lost and recovered, per-peer liveness, bus state, last frame
 - Status LEDs on the board itself
 
 ## Hardware
@@ -139,6 +141,13 @@ candump -td vcan0
 Header `{version=2, op_code=0, seq_no, count(u16 BE)}`, then per frame
 `{can_id(u32 BE, EFF 0x80000000 / RTR 0x40000000), len, data[len]}`.
 
+Each data datagram is followed about 5 ms later by a copy with the same `seq_no`
+and `op_code=0x80`. A receiver uses whichever arrives first and drops the other.
+0x80 is not a cannelloni op code: earlier versions of this component and
+`tools/can_recorder.py` ignore such datagrams, so nodes can be updated one at a
+time without anything being doubled. How the reference cannelloni
+implementation treats them has not been tested.
+
 `tools/can_recorder.py` decodes the same framing straight to a timestamped log
 with inter-frame deltas, without needing SocketCAN.
 
@@ -157,7 +166,16 @@ python tools/can_recorder.py <node-1-ip> <node-2-ip> --asc capture.asc
 ```
 
 Pass **every** node: a bridge forwards only what it hears on its own segment,
-so one node alone shows you half the conversation.
+so one node alone shows you half the conversation. Each one becomes its own ASC
+channel in the order given, so the trace records which segment a frame was
+transmitted on — that is how you tell a controller's poll from a device's answer
+while you still do not know the IDs. `--duration SECONDS` makes it stop by
+itself, for unattended captures.
+
+Timestamps are arrival times at the listening host, and every node's mirror
+takes its own path there, so frames from different nodes can be logged a few
+milliseconds out of order — a reply ahead of its poll. Pair them with a window
+on both sides. The mirror carries each datagram once, never the delayed copy.
 
 The mirror is deliberately not a peer. Frames arriving from the mirror address
 are still ignored, so a listener can never inject onto the CAN bus, and
@@ -181,6 +199,17 @@ responding looks like an unplugged cable, not a bus error. `peer_alive`
 reports the tunnel's health separately, and only reads true when *every* peer
 is reachable — a partially connected mesh means some segment is stranded.
 
+**One lost datagram is not harmless for a polled protocol.** The Solarfocus
+controller answers every missed reply by restarting its session with that
+module: a quarter-second pause, an identification request, a cycle with all
+outputs off, then normal operation again. On a real module that is an audible
+relay click. At 0.003 % loss it happened about 25 times an hour per module,
+while a module answering on the controller's own segment was never restarted.
+Hence the delayed copy of every datagram, and a UDP receive mailbox of 32
+instead of lwIP's default 6: six datagrams is a few milliseconds of traffic,
+and whatever arrives beyond that while the receive task is busy is dropped
+without a trace.
+
 **Emulator replies are injected into the tunnel explicitly.** A CAN controller
 never receives its own transmissions, so a reply that only went on the local
 wire would be invisible to a controller on another segment.
@@ -194,7 +223,7 @@ sf_module_emulator:
     address: 3          # 1/2/3 -> heating circuits 3+4 / 5+6 / 7+8
     pump_a:
       name: "HC7 Pump"
-    # ... see example/sfcantunnel3.yaml
+    # ... see packages/sf_emulator_mod3.yaml
 ```
 
 It answers the controller's poll for that address with a module identification,
@@ -202,6 +231,17 @@ sensor registers and an echo of the commanded output word. Sensor values are
 set at runtime (`id(mod3).set_flow_a(x)`), so they can come from real DS18B20s,
 Modbus, or a Home Assistant slider. Outputs the controller commands appear as
 binary sensors and can drive relays.
+
+`id(mod3).set_enabled(false)` stops it answering polls, leaving the node a
+plain tunnel; forwarding is unaffected either way.
+
+Only one responder may answer an address, so the emulator listens for replies
+to its own address that it did not send — another node emulating the same
+module, or a real module set to that address. It will not start while one is
+answering, and stops if one appears. `packages/sf_emulator_mod3.yaml` is a
+ready-made module 3 with the switch, a status sensor and a count of the
+controller's identification requests (one per session restart). The examples
+include it on two nodes; only one of them can be active at a time.
 
 The protocol — addressing, registers, sensor encoding and sentinels, output bit
 map, sensor-type configuration, discovery handshake — is written up in
@@ -219,9 +259,11 @@ This can switch 230 V pumps and mixer valves. Before wiring anything real:
 
 - Drive LEDs first and confirm the output bits behave as expected.
 - Filter short output pulses. The controller blanks its whole output word for
-  about 20 ms every 15 s; driving relays straight from the raw bits makes them
-  chatter. The emulator debounces 100 ms internally, but anything you build on
-  top should too.
+  about 20 ms every 15 s, and for up to ~0.4 s when it restarts a module's
+  session after a missed reply; driving relays straight from the raw bits makes
+  them chatter. The emulator debounces 100 ms internally, which covers the
+  first and not always the second, so anything you build on top should filter
+  too.
 - Populating a sensor slot can *overwrite* a real reading in the controller and
   unlock functions it will then try to control. Leave slots absent unless you
   mean it.
@@ -235,12 +277,18 @@ use on a three-segment installation.
 
 Not solved:
 
-- **Other module families** (solar, fresh water). The controller probes them on
-  separate CAN IDs but rejects a heating-circuit identity, and the correct type
-  code is unknown. See the protocol notes for what was ruled out.
-- **Loss-of-communication behaviour** of real modules is not fully characterised.
-- About 1.3 % of emulator replies arrive up to 16 ms late (median is far below
-  1 ms). Harmless for this protocol; would want tightening for a stricter one.
+- **Other module families.** The second family — solar, fresh water,
+  differential control and more, one electronic module whose rotary switch
+  selects the role — has been decoded from a real module: addressing,
+  identification, channels and sensor slots are in the protocol notes. The
+  emulator does not implement it yet and still speaks only the heating-circuit
+  layout.
+- **Loss-of-communication behaviour.** What the controller does when a reply
+  goes missing is known (see the design notes). What a real module does by
+  itself when the polls stop is not.
+- Emulator replies through the tunnel take about 2 ms at the median and stay
+  within 15 ms 99.9 % of the time. Harmless here: this controller ignores
+  lateness of that order and reacts only to a missing reply.
 
 ## Licence
 
