@@ -173,11 +173,26 @@ void CanUdpBridge::dispatch_responders_(uint32_t id, const uint8_t *data, uint8_
   }
 }
 
+// "alive" only when EVERY peer is reachable — a partially-connected mesh
+// means some CAN segment is cut off, which must not read as healthy.
+bool CanUdpBridge::all_peers_alive() const {
+  if (this->peer_count_ == 0)
+    return false;
+  const int64_t now_us = esp_timer_get_time();
+  for (uint8_t i = 0; i < this->peer_count_; i++) {
+    const int64_t last = this->peers_[i].last_rx_us.load();
+    if (last == 0 || (now_us - last) >= (int64_t) this->peer_timeout_ms_ * 1000)
+      return false;
+  }
+  return true;
+}
+
 void CanUdpBridge::reset_counters() {
   this->can_rx_total_.store(0);
   this->can_tx_total_.store(0);
   this->tx_failed_.store(0);
   this->rx_missed_total_.store(0);
+  this->udp_recovered_.store(0);
   this->bus_error_total_.store(0);
   this->udp_lost_.store(0);
   this->udp_send_err_.store(0);
@@ -216,20 +231,8 @@ void CanUdpBridge::loop() {
   if (this->udp_lost_sensor_ != nullptr)
     this->udp_lost_sensor_->publish_state(this->udp_lost_.load());
 
-  if (this->peer_alive_sensor_ != nullptr) {
-    // "alive" only when EVERY peer is reachable — a partially-connected mesh
-    // means some CAN segment is cut off, which must not read as healthy.
-    const int64_t now_us = esp_timer_get_time();
-    bool all_alive = this->peer_count_ > 0;
-    for (uint8_t i = 0; i < this->peer_count_; i++) {
-      const int64_t last = this->peers_[i].last_rx_us.load();
-      if (last == 0 || (now_us - last) >= (int64_t) this->peer_timeout_ms_ * 1000) {
-        all_alive = false;
-        break;
-      }
-    }
-    this->peer_alive_sensor_->publish_state(all_alive);
-  }
+  if (this->peer_alive_sensor_ != nullptr)
+    this->peer_alive_sensor_->publish_state(this->all_peers_alive());
 
   if (this->bus_state_sensor_ != nullptr) {
     const char *state_str = "STOPPED";
@@ -388,6 +391,10 @@ void CanUdpBridge::batch_flush_() {
     if (sent < 0)
       this->udp_send_err_.fetch_add(1);
   }
+  // A delayed copy for the peers only; the sniffer gets the original alone.
+  // Keepalives carry nothing worth repeating.
+  if (this->udp_frame_count_ > 0)
+    this->queue_copy_();
 
   // ...and to the mirror target, if a sniffer is listening. Send-only: nothing
   // from that address is ever accepted, so it cannot reach the CAN bus.
@@ -405,6 +412,35 @@ void CanUdpBridge::batch_flush_() {
   this->last_udp_tx_us_ = esp_timer_get_time();
   this->udp_frame_count_ = 0;
   this->udp_len_ = 0;
+}
+
+void CanUdpBridge::queue_copy_() {
+  if (this->peer_count_ == 0 || this->udp_len_ > COPY_MAX_LEN)
+    return;  // too big only with batching enabled; per-frame datagrams always fit
+  if (this->copy_count_ == COPY_SLOTS)
+    this->send_oldest_copy_();  // never drop a copy: send the oldest a little early
+  PendingCopy &c = this->copies_[(this->copy_head_ + this->copy_count_) % COPY_SLOTS];
+  memcpy(c.data, this->udp_buf_, this->udp_len_);
+  c.data[1] = CNL_OP_DATA_COPY;
+  c.len = this->udp_len_;
+  c.due_us = esp_timer_get_time() + COPY_DELAY_US;
+  this->copy_count_++;
+}
+
+void CanUdpBridge::send_due_copies_(int64_t now_us) {
+  while (this->copy_count_ > 0 && this->copies_[this->copy_head_].due_us <= now_us)
+    this->send_oldest_copy_();
+}
+
+void CanUdpBridge::send_oldest_copy_() {
+  const PendingCopy &c = this->copies_[this->copy_head_];
+  for (uint8_t i = 0; i < this->peer_count_; i++) {
+    if (sendto(this->sock_, c.data, c.len, 0, (struct sockaddr *) &this->peers_[i].addr,
+               sizeof(this->peers_[i].addr)) < 0)
+      this->udp_send_err_.fetch_add(1);
+  }
+  this->copy_head_ = (this->copy_head_ + 1) % COPY_SLOTS;
+  this->copy_count_--;
 }
 
 void CanUdpBridge::can_task_() {
@@ -540,6 +576,9 @@ void CanUdpBridge::can_task_() {
       this->udp_frame_count_ = 0;
       this->batch_flush_();
     }
+    // This loop comes round at least every millisecond (the receive timeout),
+    // so a copy leaves within ~1 ms of its due time.
+    this->send_due_copies_(now2_us);
   }
 }
 
@@ -558,17 +597,43 @@ int CanUdpBridge::find_peer_(const struct sockaddr_in &src) {
 }
 
 void CanUdpBridge::handle_udp_payload_(const uint8_t *buf, size_t len, PeerState &peer) {
-  if (len < CNL_HEADER_LEN || buf[0] != CNL_VERSION || buf[1] != CNL_OP_DATA)
+  if (len < CNL_HEADER_LEN || buf[0] != CNL_VERSION ||
+      (buf[1] != CNL_OP_DATA && buf[1] != CNL_OP_DATA_COPY))
     return;
-
+  const bool is_copy = buf[1] == CNL_OP_DATA_COPY;
   const uint8_t seq = buf[2];
-  if (peer.seq_valid) {
-    const uint8_t gap = (uint8_t) (seq - (uint8_t) (peer.seq_no + 1));
-    if (gap > 0 && gap < 128)  // treat large "gaps" as peer restart, not loss
-      this->udp_lost_.fetch_add(gap);
+
+  // Each datagram can arrive twice (original, then the delayed copy, or the
+  // other way round); whichever comes first is used and the other dropped.
+  const uint32_t stamp = (uint32_t) esp_timer_get_time() | 1u;  // 0 means "never"
+  const uint32_t seen = peer.seen_us[seq];
+  if (seen != 0 && stamp - seen < DEDUP_WINDOW_US)
+    return;
+  peer.seen_us[seq] = stamp;
+
+  // Loss accounting on what is left: a gap counts as lost when it is skipped,
+  // and is taken back if a late copy fills it, so udp_lost_ ends up counting
+  // datagrams whose original AND copy were both lost - what the HMI missed.
+  if (!peer.seq_valid) {
+    peer.seq_no = seq;
+    peer.seq_valid = true;
+  } else {
+    const uint8_t ahead = (uint8_t) (seq - peer.seq_no);
+    const uint8_t behind = (uint8_t) (peer.seq_no - seq);
+    if (ahead != 0 && ahead < 128) {
+      if (ahead > 1)
+        this->udp_lost_.fetch_add(ahead - 1);
+      peer.seq_no = seq;
+    } else if (ahead != 0 && behind <= LATE_MAX) {
+      uint32_t lost = this->udp_lost_.load();
+      while (lost > 0 && !this->udp_lost_.compare_exchange_weak(lost, lost - 1)) {
+      }
+    } else {
+      peer.seq_no = seq;  // far off: the peer restarted its sequence
+    }
   }
-  peer.seq_no = seq;
-  peer.seq_valid = true;
+  if (is_copy)
+    this->udp_recovered_.fetch_add(1);  // the original never made it
 
   uint16_t count;
   memcpy(&count, buf + 3, 2);
@@ -639,6 +704,13 @@ void CanUdpBridge::udp_task_() {
     if (pi < 0)
       continue;  // not one of our peers — drop silently
     const int64_t now = esp_timer_get_time();
+    // Silent for over two keepalive periods: the peer rebooted, and its new
+    // sequence must not be read as a burst of loss.
+    const int64_t prev = this->peers_[pi].last_rx_us.load();
+    if (prev != 0 && now - prev > 2000000) {
+      this->peers_[pi].seq_valid = false;
+      memset(this->peers_[pi].seen_us, 0, sizeof(this->peers_[pi].seen_us));
+    }
     this->peers_[pi].last_rx_us.store(now);
     this->last_peer_rx_us_.store(now);
     this->handle_udp_payload_(buf, (size_t) n, this->peers_[pi]);

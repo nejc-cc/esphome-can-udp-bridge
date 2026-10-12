@@ -52,6 +52,13 @@ esp32:
   board: ${board}
   framework:
     type: esp-idf
+    sdkconfig_options:
+      # Room for tunnel datagrams while the UDP task is busy putting frames on
+      # the CAN bus. The default of 6 is ~6 ms of traffic now that every
+      # datagram is sent twice, and lwIP drops anything beyond it silently.
+      CONFIG_LWIP_UDP_RECVMBOX_SIZE: "32"
+      # Same reasoning one layer down, for the Ethernet receive DMA (default 10).
+      CONFIG_ETH_DMA_RX_BUFFER_NUM: "20"
 
 ethernet:
   type: ${eth_type}
@@ -73,7 +80,10 @@ api:
 
 ota:
   - platform: esphome
-    password: !secret otapass
+    # Encrypted with the API key; needs ESPHome 2026.9.0 or newer. A device still
+    # on password OTA has to be moved over in two installs - see the ESPHome
+    # documentation for the esphome OTA platform.
+    encryption:
 
 web_server:
   port: ${web_port}
@@ -234,6 +244,16 @@ text_sensor:
       return std::string("sending to " + id(can_bridge).get_mirror_ip());
 
 sensor:
+  # Datagrams that only got through as the delayed copy: each one is a reply
+  # the HMI would have missed, i.e. a module session restart and a relay click
+  # avoided. Tunnel Lost Packets now counts only those where both copies failed.
+  - platform: template
+    name: "Tunnel Recovered Packets"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    state_class: total_increasing
+    update_interval: 10s
+    lambda: return (float) id(can_bridge).get_recovered();
   - platform: uptime
     name: "${friendly_name} Uptime"
     update_interval: 60s
