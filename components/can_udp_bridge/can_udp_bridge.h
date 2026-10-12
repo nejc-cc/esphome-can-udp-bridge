@@ -32,6 +32,27 @@ enum class BusState : uint8_t { STOPPED = 0, RUNNING = 1, RECOVERING = 2, BUS_OF
 
 static constexpr uint8_t CNL_VERSION = 2;
 static constexpr uint8_t CNL_OP_DATA = 0;
+// A delayed second copy of a DATA datagram, same seq. Not a cannelloni op code:
+// anything that only knows cannelloni - including this component before copies
+// existed - drops it, so copies are invisible to it and nodes can be updated
+// one at a time without frames ever being doubled.
+static constexpr uint8_t CNL_OP_DATA_COPY = 0x80;
+
+// Every datagram to the peers is sent a second time this much later; receivers
+// keep whichever copy arrives first. A single lost packet otherwise costs the
+// HMI a reply, and it answers each missed reply by restarting its session with
+// that module - outputs off and on again, an audible relay click. The delay
+// lets the copy miss a short burst that took the original; the HMI accepts
+// replies far later than this.
+static constexpr int64_t COPY_DELAY_US = 5000;
+static constexpr int COPY_SLOTS = 8;
+static constexpr size_t COPY_MAX_LEN = 128;  // per-frame datagrams are 18-31 bytes
+// The same seq again within this window is the copy, not a new datagram. Far
+// below the time the 8-bit seq takes to wrap at these datagram rates.
+static constexpr uint32_t DEDUP_WINDOW_US = 50000;
+// A datagram at most this far behind the newest fills a gap (a late copy);
+// further behind means the peer restarted its sequence.
+static constexpr uint8_t LATE_MAX = 16;
 static constexpr uint32_t CNL_EFF_FLAG = 0x80000000UL;
 static constexpr uint32_t CNL_RTR_FLAG = 0x40000000UL;
 static constexpr uint32_t CNL_SFF_MASK = 0x000007FFUL;
@@ -72,6 +93,10 @@ class CanUdpBridge : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
+
+  // Datagrams that arrived only as the delayed copy - each one a reply the HMI
+  // would otherwise have missed. Main-loop context.
+  uint32_t get_recovered() const { return udp_recovered_.load(); }
 
   // codegen setters
   void set_pins(int tx, int rx) {
@@ -131,6 +156,10 @@ class CanUdpBridge : public Component {
       this->responders_[this->responder_count_++] = r;
   }
 
+  // True when every configured peer has been heard within peer_timeout. A
+  // partially connected mesh is not alive: some segment is cut off.
+  bool all_peers_alive() const;
+
   uint32_t get_bit_rate() const { return pending_bitrate_.load(); }
   BridgeMode get_mode() const { return static_cast<BridgeMode>(pending_mode_.load()); }
 
@@ -142,7 +171,15 @@ class CanUdpBridge : public Component {
     struct sockaddr_in addr {};
     std::atomic<int64_t> last_rx_us{0};
     bool seq_valid{false};  // udp_task-private
-    uint8_t seq_no{0};      // udp_task-private
+    uint8_t seq_no{0};      // udp_task-private: newest seq accepted
+    uint32_t seen_us[256]{};  // udp_task-private: when each seq was last accepted, 0 = never
+  };
+
+  // A copy waiting to be sent (can_task-private).
+  struct PendingCopy {
+    int64_t due_us;
+    uint16_t len;
+    uint8_t data[COPY_MAX_LEN];
   };
 
   static void can_task_trampoline(void *pv);
@@ -153,6 +190,9 @@ class CanUdpBridge : public Component {
   void twai_stop_and_uninstall_();
   void batch_append_(const twai_message_t &msg);
   void batch_flush_();
+  void queue_copy_();                     // can_task: schedule the copy of udp_buf_
+  void send_due_copies_(int64_t now_us);  // can_task: send copies whose time has come
+  void send_oldest_copy_();
   void handle_udp_payload_(const uint8_t *buf, size_t len, PeerState &peer);
   int find_peer_(const struct sockaddr_in &src);
   void store_last_frame_(const twai_message_t &msg);
@@ -190,12 +230,14 @@ class CanUdpBridge : public Component {
   size_t udp_len_{0};
   uint16_t udp_frame_count_{0};
   uint8_t tx_seq_no_{0};
+  PendingCopy copies_[COPY_SLOTS];
+  uint8_t copy_head_{0}, copy_count_{0};
   int64_t first_frame_us_{0};
   int64_t last_udp_tx_us_{0};
 
   // stats (written by tasks, read by loop())
   std::atomic<uint32_t> can_rx_total_{0}, can_tx_total_{0}, tx_failed_{0}, rx_missed_total_{0},
-      bus_error_total_{0}, udp_lost_{0}, udp_send_err_{0};
+      bus_error_total_{0}, udp_lost_{0}, udp_send_err_{0}, udp_recovered_{0};
   std::atomic<int64_t> last_peer_rx_us_{0};
   std::atomic<uint8_t> bus_state_{static_cast<uint8_t>(BusState::STOPPED)};
   SemaphoreHandle_t last_frame_mutex_{nullptr};
