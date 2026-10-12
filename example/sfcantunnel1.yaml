@@ -37,6 +37,10 @@ substitutions:
 
 packages:
   common: !include packages/can_bridge_common.yaml
+  # Emulated module 3, off until switched on. Here it answers the HMI on its own
+  # bus with no tunnel in between, as a module on copper would. tun3 carries the
+  # same package; the emulator refuses to run on both at once.
+  emulator: !include packages/sf_emulator_mod3.yaml
 
 ethernet:
   manual_ip:
@@ -48,9 +52,7 @@ ethernet:
 can_udp_bridge:
   peers:
     - !secret ip_sfcantunnel2
-#    - !secret ip_sfcantunnel3
-
-
+    - !secret ip_sfcantunnel3
 
 api:
   encryption:

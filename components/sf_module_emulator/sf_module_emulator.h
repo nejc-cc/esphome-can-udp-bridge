@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <string>
 
 namespace esphome {
 namespace sf_module_emulator {
@@ -32,6 +33,18 @@ static constexpr uint16_t SF_STATUS_WORD = 0x0530;
 // The HMI blanks the whole output word for ~20 ms every 15 s. Ignore changes
 // that do not persist at least this long, otherwise driven relays chatter.
 static constexpr uint32_t SF_OUTPUT_DEBOUNCE_MS = 100;
+// Interlock: only one responder may answer an address. Emulation starts only
+// after this long without anyone else's reply for the address, heard with
+// every tunnel peer reachable. The HMI polls an adopted module every ~10 ms and
+// pauses at most ~0.3 s, so a live responder cannot hide for this long.
+static constexpr uint32_t SF_INTERLOCK_HOLD_MS = 1000;
+
+// Why emulation is off when it was not simply switched off.
+enum class SfStopReason : uint8_t {
+  NONE = 0,
+  REFUSED,       // asked to start while another responder was answering
+  STEPPED_DOWN,  // was answering when another responder appeared
+};
 
 // Extra sensor slots, identified by setting one at a time and reading the HMI.
 // Populating them unlocks buffer tank, DHW tank and recirculation functions.
@@ -61,11 +74,16 @@ enum SfOutput {
 class SfModuleEmulator : public Component, public can_udp_bridge::CanFrameResponder {
  public:
   void setup() override;
+  void loop() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA; }
 
   // --- CanFrameResponder ---
-  bool wants(uint32_t can_id) const override { return can_id == this->poll_id_; }
+  // Polls only while answering; replies for this address always, so another
+  // responder is noticed even while this one is off.
+  bool wants(uint32_t can_id) const override {
+    return can_id == this->reply_id_ || (this->active_.load() && can_id == this->poll_id_);
+  }
   bool handle_frame(uint32_t can_id, const uint8_t *data, uint8_t len,
                     twai_message_t &reply) override;
   void publish_state() override;
@@ -108,10 +126,36 @@ class SfModuleEmulator : public Component, public can_udp_bridge::CanFrameRespon
   }
   uint16_t get_output_word() const { return out_debounced_.load(); }
 
+  // Request emulation on or off. Off: polls for this address go unanswered and
+  // the board is left a plain tunnel; forwarding is untouched either way. On:
+  // starts once the interlock allows (see SF_INTERLOCK_HOLD_MS), or is refused
+  // if another responder answers this address. Main-loop context.
+  void set_enabled(bool en);
+  // The request as it stands, i.e. what a switch should show: drops back to
+  // false when refused or when stepping down for another responder.
+  bool get_enabled() const { return this->wanted_.load(); }
+  // Whether polls are actually being answered right now.
+  bool is_active() const { return this->active_.load(); }
+  // One-line human-readable state for a text sensor. Main-loop context.
+  std::string get_status() const;
+  // ch 0x00 polls answered since emulation last started. The HMI sends one each
+  // time it (re)opens its session with the module, so this counts restarts.
+  uint32_t get_ident_requests() const { return this->ident_requests_.load(); }
+
  protected:
   static int16_t deci_(float c) { return (int16_t) lroundf(c * 10.0f); }
 
   can_udp_bridge::CanUdpBridge *bridge_{nullptr};
+
+  // Interlock. wanted_ is the request, active_ whether polls are answered.
+  // Without a switch the emulator wants to run, so it still starts by itself.
+  std::atomic<bool> wanted_{true};
+  std::atomic<bool> active_{false};
+  std::atomic<int64_t> last_foreign_us_{-1};  // last reply for our address not sent by us
+  std::atomic<uint8_t> stop_reason_{static_cast<uint8_t>(SfStopReason::NONE)};
+  std::atomic<bool> stepped_down_{false};  // CAN task -> loop(), for logging
+  std::atomic<uint32_t> ident_requests_{0};
+  int64_t listening_since_us_{0};  // main-loop private; 0 = not listening yet
   uint8_t address_{3};
   uint32_t poll_id_{SF_POLL_ID_BASE + 3}, reply_id_{SF_RESP_ID_BASE + 3};
   uint16_t type_code_{0x4BE6};

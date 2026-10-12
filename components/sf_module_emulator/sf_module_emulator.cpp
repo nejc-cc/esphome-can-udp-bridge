@@ -2,6 +2,7 @@
 #include "esphome/core/log.h"
 
 #include "esp_timer.h"
+#include <cstdio>
 #include <cstring>
 
 namespace esphome {
@@ -25,16 +26,105 @@ void SfModuleEmulator::dump_config() {
                 (unsigned) this->reply_id_);
   ESP_LOGCONFIG(TAG, "  Ident: type 0x%04X, module type 0x%02X", (unsigned) this->type_code_,
                 (unsigned) this->module_type_);
+  ESP_LOGCONFIG(TAG, "  Emulation: %s", this->wanted_.load() ? "requested" : "off (tunnel only)");
+  ESP_LOGCONFIG(TAG, "  Interlock: will not answer while 0x%03X is answered elsewhere",
+                (unsigned) this->reply_id_);
+}
+
+void SfModuleEmulator::set_enabled(bool en) {
+  this->stop_reason_.store(static_cast<uint8_t>(SfStopReason::NONE));
+  if (en) {
+    this->wanted_.store(true);  // loop() starts it once the interlock allows
+    return;
+  }
+  this->wanted_.store(false);
+  if (this->active_.exchange(false))
+    ESP_LOGI(TAG, "Emulation off - 0x%03X no longer answered", (unsigned) this->poll_id_);
+  this->out_debounced_.store(0);  // no module -> nothing commanded
+}
+
+void SfModuleEmulator::loop() {
+  const int64_t now = esp_timer_get_time();
+  const int64_t hold = (int64_t) SF_INTERLOCK_HOLD_MS * 1000;
+
+  if (this->stepped_down_.exchange(false))
+    ESP_LOGW(TAG, "0x%03X is answered elsewhere too - emulation stopped",
+             (unsigned) this->reply_id_);
+
+  // Listening only counts while the whole mesh is reachable: a peer we cannot
+  // hear could be answering this address right now.
+  if (!this->bridge_->all_peers_alive()) {
+    this->listening_since_us_ = 0;
+  } else if (this->listening_since_us_ == 0) {
+    this->listening_since_us_ = now;
+  }
+
+  // Once answering, keep going through a peer outage: dropping the module
+  // because the network blipped would be worse than the risk it guards.
+  if (!this->wanted_.load() || this->active_.load())
+    return;
+
+  const int64_t last = this->last_foreign_us_.load();
+  if (last >= 0 && now - last < hold) {
+    this->wanted_.store(false);
+    this->stop_reason_.store(static_cast<uint8_t>(SfStopReason::REFUSED));
+    ESP_LOGW(TAG, "Not starting: 0x%03X is already answered elsewhere", (unsigned) this->reply_id_);
+    return;
+  }
+  if (this->listening_since_us_ != 0 && now - this->listening_since_us_ >= hold) {
+    this->ident_requests_.store(0);
+    this->active_.store(true);
+    ESP_LOGI(TAG, "Emulating address %u - answering 0x%03X", this->address_,
+             (unsigned) this->poll_id_);
+  }
+}
+
+std::string SfModuleEmulator::get_status() const {
+  char buf[56];
+  if (this->active_.load()) {
+    snprintf(buf, sizeof(buf), "on - answering 0x%03X", (unsigned) this->poll_id_);
+    return buf;
+  }
+  if (this->wanted_.load())
+    return this->listening_since_us_ == 0 ? "starting - waiting for all peers"
+                                          : "starting - listening for other responders";
+  switch (static_cast<SfStopReason>(this->stop_reason_.load())) {
+    case SfStopReason::REFUSED:
+      snprintf(buf, sizeof(buf), "refused - 0x%03X answered elsewhere", (unsigned) this->reply_id_);
+      return buf;
+    case SfStopReason::STEPPED_DOWN:
+      snprintf(buf, sizeof(buf), "stopped - 0x%03X answered elsewhere", (unsigned) this->reply_id_);
+      return buf;
+    default:
+      return "off";
+  }
 }
 
 // Runs in the bridge's CAN task, so the turnaround is well under a
 // millisecond like the genuine hardware.
 bool SfModuleEmulator::handle_frame(uint32_t can_id, const uint8_t *data, uint8_t len,
                                     twai_message_t &reply) {
-  if (can_id != this->poll_id_ || len < 3)
+  if (can_id == this->reply_id_) {
+    // A reply for our address that we did not send: another emulator, or a real
+    // module set to this address. Our own never come back here - the controller
+    // does not receive its own frames, and peers do not relay tunnelled ones.
+    this->last_foreign_us_.store(esp_timer_get_time());
+    if (this->active_.exchange(false)) {
+      // Two responders on one address give the HMI two answers to every poll.
+      // Neither can know which one is meant, so both step down.
+      this->wanted_.store(false);
+      this->out_debounced_.store(0);
+      this->stop_reason_.store(static_cast<uint8_t>(SfStopReason::STEPPED_DOWN));
+      this->stepped_down_.store(true);
+    }
+    return false;
+  }
+  if (!this->active_.load() || can_id != this->poll_id_ || len < 3)
     return false;
 
   const uint8_t ch = data[0];
+  if (ch == 0x00)
+    this->ident_requests_.fetch_add(1);
   const uint16_t out = (uint16_t) data[1] | ((uint16_t) data[2] << 8);
 
   // Debounce the commanded output word (the HMI blanks it briefly every 15 s).
