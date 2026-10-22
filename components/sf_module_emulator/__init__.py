@@ -16,6 +16,8 @@ CONF_POLL_ID = "poll_id"
 CONF_REPLY_ID = "reply_id"
 CONF_TYPE_CODE = "type_code"
 CONF_MODULE_TYPE = "module_type"
+CONF_REQUIRE_ALL_PEERS = "require_all_peers"
+CONF_SESSION_START_HOLD = "session_start_hold"
 
 # Order must match the SfOutput enum in sf_module_emulator.h
 OUTPUTS = [
@@ -42,6 +44,14 @@ _SCHEMA = cv.Schema(
         # Identification fields; defaults are the heating-circuit values.
         cv.Optional(CONF_TYPE_CODE, default=0x4BE6): cv.hex_int_range(min=0, max=0xFFFF),
         cv.Optional(CONF_MODULE_TYPE, default=0): cv.hex_int_range(min=0, max=0xFF),
+        # false: start without every tunnel peer reachable. For the only module
+        # at its address (see set_require_all_peers() in the header).
+        cv.Optional(CONF_REQUIRE_ALL_PEERS, default=True): cv.boolean,
+        # Hold the outputs through the all-off word that opens an HMI session,
+        # for at most this long (see set_session_start_hold()).
+        cv.Optional(
+            CONF_SESSION_START_HOLD, default="0ms"
+        ): cv.positive_time_period_milliseconds,
         **{
             cv.Optional(name): binary_sensor.binary_sensor_schema()
             for name in OUTPUTS
@@ -64,6 +74,8 @@ async def to_code(config):
             poll = conf.get(CONF_POLL_ID, 0x1E6 + conf[CONF_ADDRESS])
             cg.add(var.set_ids(poll, conf.get(CONF_REPLY_ID, poll + 0x3A)))
         cg.add(var.set_ident(conf[CONF_TYPE_CODE], conf[CONF_MODULE_TYPE]))
+        cg.add(var.set_require_all_peers(conf[CONF_REQUIRE_ALL_PEERS]))
+        cg.add(var.set_session_start_hold(conf[CONF_SESSION_START_HOLD]))
 
         for idx, name in enumerate(OUTPUTS):
             if name in conf:

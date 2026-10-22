@@ -243,6 +243,25 @@ ready-made module 3 with the switch, a status sensor and a count of the
 controller's identification requests (one per session restart). The examples
 include it on two nodes; only one of them can be active at a time.
 
+When the emulator is the only module at its address and drives real relays,
+two options and a getter help:
+
+```yaml
+    require_all_peers: false   # start even if a tunnel peer is unreachable
+    session_start_hold: 100ms  # ride through the all-off that opens a session
+```
+
+By default the emulator starts only while every tunnel peer is reachable, so a
+responder behind an unreachable peer cannot go unnoticed. With
+`require_all_peers: false` it starts regardless: polls reach it only through
+the controller's node anyway, and what goes unheard is a responder behind
+another peer whose link to this node alone is down. `session_start_hold` keeps
+the previous outputs through an all-off output word for at most that long after
+the controller (re)opens its session; any other word ends the hold, and all-off
+after it is a real switch-off. `id(mod3).get_ms_since_poll()` returns the time
+since the controller last polled the address (0 while not emulating), for a
+relay watchdog on lost communication.
+
 The protocol — addressing, registers, sensor encoding and sentinels, output bit
 map, sensor-type configuration, discovery handshake — is written up in
 [`docs/solarfocus-protocol-notes.md`](docs/solarfocus-protocol-notes.md),
@@ -262,8 +281,8 @@ This can switch 230 V pumps and mixer valves. Before wiring anything real:
   about 20 ms every 15 s, and for up to ~0.4 s when it restarts a module's
   session after a missed reply; driving relays straight from the raw bits makes
   them chatter. The emulator debounces 100 ms internally, which covers the
-  first and not always the second, so anything you build on top should filter
-  too.
+  first and not always the second; `session_start_hold` extends it for the
+  second. Anything you build on top should filter too.
 - Populating a sensor slot can *overwrite* a real reading in the controller and
   unlock functions it will then try to control. Leave slots absent unless you
   mean it.

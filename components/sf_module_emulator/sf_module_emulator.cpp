@@ -52,8 +52,9 @@ void SfModuleEmulator::loop() {
              (unsigned) this->reply_id_);
 
   // Listening only counts while the whole mesh is reachable: a peer we cannot
-  // hear could be answering this address right now.
-  if (!this->bridge_->all_peers_alive()) {
+  // hear could be answering this address right now. Unless this node is the
+  // only module at its address (see set_require_all_peers()).
+  if (this->require_all_peers_ && !this->bridge_->all_peers_alive()) {
     this->listening_since_us_ = 0;
   } else if (this->listening_since_us_ == 0) {
     this->listening_since_us_ = now;
@@ -73,6 +74,7 @@ void SfModuleEmulator::loop() {
   }
   if (this->listening_since_us_ != 0 && now - this->listening_since_us_ >= hold) {
     this->ident_requests_.store(0);
+    this->last_poll_us_.store(now);  // the watchdog window starts here, not at an old poll
     this->active_.store(true);
     ESP_LOGI(TAG, "Emulating address %u - answering 0x%03X", this->address_,
              (unsigned) this->poll_id_);
@@ -100,6 +102,12 @@ std::string SfModuleEmulator::get_status() const {
   }
 }
 
+uint32_t SfModuleEmulator::get_ms_since_poll() const {
+  if (!this->active_.load())
+    return 0;
+  return (uint32_t) ((esp_timer_get_time() - this->last_poll_us_.load()) / 1000);
+}
+
 // Runs in the bridge's CAN task, so the turnaround is well under a
 // millisecond like the genuine hardware.
 bool SfModuleEmulator::handle_frame(uint32_t can_id, const uint8_t *data, uint8_t len,
@@ -122,14 +130,23 @@ bool SfModuleEmulator::handle_frame(uint32_t can_id, const uint8_t *data, uint8_
   if (!this->active_.load() || can_id != this->poll_id_ || len < 3)
     return false;
 
+  const int64_t now_us = esp_timer_get_time();
+  this->last_poll_us_.store(now_us);
   const uint8_t ch = data[0];
-  if (ch == 0x00)
+  if (ch == 0x00) {
     this->ident_requests_.fetch_add(1);
+    this->zero_hold_until_us_ = now_us + this->session_start_hold_us_;
+  }
   const uint16_t out = (uint16_t) data[1] | ((uint16_t) data[2] << 8);
 
   // Debounce the commanded output word (the HMI blanks it briefly every 15 s).
-  const int64_t now_us = esp_timer_get_time();
-  if (out != this->out_pending_) {
+  // All-off right after a session (re)start is held back instead, for at most
+  // session_start_hold; any other word ends that hold.
+  if (out != 0)
+    this->zero_hold_until_us_ = 0;
+  if (out == 0 && now_us < this->zero_hold_until_us_) {
+    // keep driving what was driven before the restart
+  } else if (out != this->out_pending_) {
     this->out_pending_ = out;
     this->out_pending_since_us_ = now_us;
   } else if (this->out_debounced_.load() != out &&
