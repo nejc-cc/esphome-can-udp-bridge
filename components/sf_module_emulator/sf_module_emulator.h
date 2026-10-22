@@ -32,11 +32,13 @@ static constexpr int16_t SF_SENSOR_ABSENT = 2700;
 static constexpr uint16_t SF_STATUS_WORD = 0x0530;
 // The HMI blanks the whole output word for ~20 ms every 15 s. Ignore changes
 // that do not persist at least this long, otherwise driven relays chatter.
+// Session restarts blank it for longer; see set_session_start_hold().
 static constexpr uint32_t SF_OUTPUT_DEBOUNCE_MS = 100;
 // Interlock: only one responder may answer an address. Emulation starts only
 // after this long without anyone else's reply for the address, heard with
-// every tunnel peer reachable. The HMI polls an adopted module every ~10 ms and
-// pauses at most ~0.3 s, so a live responder cannot hide for this long.
+// every tunnel peer reachable (unless set_require_all_peers(false)). The HMI
+// polls an adopted module every ~10 ms and pauses at most ~0.3 s, so a live
+// responder cannot hide for this long.
 static constexpr uint32_t SF_INTERLOCK_HOLD_MS = 1000;
 
 // Why emulation is off when it was not simply switched off.
@@ -107,6 +109,17 @@ class SfModuleEmulator : public Component, public can_udp_bridge::CanFrameRespon
     type_code_ = type_code;
     module_type_ = module_type;
   }
+  // false: start without every tunnel peer reachable. For a node that is the
+  // only module at its address. Polls reach it only through the HMI's node, so
+  // with that peer gone there is nothing to answer anyway; what goes unheard is
+  // a responder behind another peer whose link to this node alone is down.
+  void set_require_all_peers(bool require) { require_all_peers_ = require; }
+  // When the HMI (re)opens its session (ch 0x00 poll) it commands all outputs
+  // off for typically ~90 ms, at most ~0.4 s seen, before restoring them. Keep
+  // the previous outputs through an all-off word for at most this long; any
+  // other word ends the hold, and all-off after it is a real switch-off.
+  // 0 passes it straight to the debounce, as a real module does.
+  void set_session_start_hold(uint32_t ms) { session_start_hold_us_ = (int64_t) ms * 1000; }
   void set_output_sensor(int idx, binary_sensor::BinarySensor *s) {
     if (idx >= 0 && idx < SF_NUM_OUTPUTS)
       out_sensors_[idx] = s;
@@ -141,6 +154,10 @@ class SfModuleEmulator : public Component, public can_udp_bridge::CanFrameRespon
   // ch 0x00 polls answered since emulation last started. The HMI sends one each
   // time it (re)opens its session with the module, so this counts restarts.
   uint32_t get_ident_requests() const { return this->ident_requests_.load(); }
+  // Milliseconds since the HMI last polled this address, for a relay watchdog
+  // on lost communication. 0 while not emulating, so the watchdog stays quiet
+  // when emulation is off or has stepped down.
+  uint32_t get_ms_since_poll() const;
 
  protected:
   static int16_t deci_(float c) { return (int16_t) lroundf(c * 10.0f); }
@@ -155,11 +172,14 @@ class SfModuleEmulator : public Component, public can_udp_bridge::CanFrameRespon
   std::atomic<uint8_t> stop_reason_{static_cast<uint8_t>(SfStopReason::NONE)};
   std::atomic<bool> stepped_down_{false};  // CAN task -> loop(), for logging
   std::atomic<uint32_t> ident_requests_{0};
+  std::atomic<int64_t> last_poll_us_{0};  // last poll for our address, CAN task -> main loop
   int64_t listening_since_us_{0};  // main-loop private; 0 = not listening yet
   uint8_t address_{3};
   uint32_t poll_id_{SF_POLL_ID_BASE + 3}, reply_id_{SF_RESP_ID_BASE + 3};
   uint16_t type_code_{0x4BE6};
   uint8_t module_type_{0x00};
+  bool require_all_peers_{true};
+  int64_t session_start_hold_us_{0};
 
   std::atomic<int16_t> flow_a_{SF_SENSOR_ABSENT}, flow_b_{SF_SENSOR_ABSENT};
   std::atomic<int16_t> aux_[SF_NUM_AUX]{{SF_SENSOR_ABSENT}, {SF_SENSOR_ABSENT},
@@ -171,6 +191,7 @@ class SfModuleEmulator : public Component, public can_udp_bridge::CanFrameRespon
 
   uint16_t out_pending_{0};          // CAN-task private
   int64_t out_pending_since_us_{0};  // CAN-task private
+  int64_t zero_hold_until_us_{0};    // CAN-task private
 
   binary_sensor::BinarySensor *out_sensors_[SF_NUM_OUTPUTS]{};
   uint32_t last_published_{0xFFFFFFFFUL};  // main-loop private
